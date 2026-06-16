@@ -376,10 +376,19 @@ Si ese comando no responde, avisa al docente antes de continuar.
 
 ### Paso 2: descargar y ejecutar JupyterLab
 
-Copia y ejecuta este comando:
+Si estás en macOS o Linux, copia y ejecuta este comando:
 
 ```bash
-docker run --rm -p 8888:8888 -v "$PWD":/home/jovyan/work quay.io/jupyter/scipy-notebook:latest
+docker run --rm -p 8888:8888 \
+  -v "$(pwd)":/home/jovyan/work \
+  quay.io/jupyter/scipy-notebook:latest \
+  start-notebook.py --ServerApp.root_dir=/home/jovyan/work
+```
+
+Si estás en Windows con PowerShell, usa este comando:
+
+```powershell
+docker run --rm -p 8888:8888 -v "${PWD}:/home/jovyan/work" quay.io/jupyter/scipy-notebook:latest start-notebook.py --ServerApp.root_dir=/home/jovyan/work
 ```
 
 Qué significa cada parte:
@@ -389,8 +398,9 @@ Qué significa cada parte:
 | `docker run` | Crea y ejecuta un contenedor |
 | `--rm` | Borra el contenedor cuando lo apagues |
 | `-p 8888:8888` | Conecta el puerto de Jupyter con tu navegador |
-| `-v "$PWD":/home/jovyan/work` | Comparte tu carpeta actual con el contenedor |
+| `-v "$(pwd)":/home/jovyan/work` | Comparte tu carpeta actual con el contenedor |
 | `quay.io/jupyter/scipy-notebook:latest` | Imagen que trae JupyterLab, pandas y scikit-learn |
+| `--ServerApp.root_dir=/home/jovyan/work` | Hace que JupyterLab abra directamente en la carpeta compartida |
 
 La primera vez puede tardar porque Docker debe descargar la imagen.
 
@@ -410,15 +420,14 @@ Copia esa URL completa y ábrela en tu navegador.
 
 Dentro de JupyterLab:
 
-1. En el panel izquierdo, entra a la carpeta `work`.
-2. Haz clic en **Python 3 (ipykernel)** para crear un notebook.
-3. Guarda el notebook con este nombre:
+1. Haz clic en **Python 3 (ipykernel)** para crear un notebook.
+2. Guarda el notebook con este nombre:
 
 ```txt
 clase-05-paraguas.ipynb
 ```
 
-4. Ejecuta primero una celda simple:
+3. Ejecuta primero una celda simple:
 
 ```python
 print("hola")
@@ -427,6 +436,8 @@ print("hola")
 Para correr una celda puedes usar `Shift + Enter` o el botón de play.
 
 Si aparece `hola`, el notebook está listo.
+
+Como configuramos JupyterLab para abrir en `/home/jovyan/work`, lo que ves en el panel izquierdo ya es tu carpeta local del curso. Por eso no necesitas entrar a una carpeta `work`.
 
 ### Celda 1: crear datos de ejemplo en el notebook
 
@@ -600,7 +611,7 @@ Docker preguntará si quieres detener el servidor. Confirma con `y` si aparece l
 Como usamos `--rm`, el contenedor se elimina al apagarse. El notebook queda guardado en tu carpeta del curso porque usamos:
 
 ```bash
--v "$PWD":/home/jovyan/work
+-v "$(pwd)":/home/jovyan/work
 ```
 
 ---
