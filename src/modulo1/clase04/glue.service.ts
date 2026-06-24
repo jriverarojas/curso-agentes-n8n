@@ -35,7 +35,7 @@ export class GlueService {
         '--APPLICATION_ID': args.applicationId,
         '--INPUT_KEY': args.inputKey,
         '--OUTPUT_KEY': args.outputKey,
-        '--CONFIDENCE_THRESHOLD': '80',
+        '--CONFIDENCE_THRESHOLD': '70',
       },
     });
 
@@ -56,5 +56,29 @@ export class GlueService {
     );
 
     return response.JobRun?.JobRunState ?? 'UNKNOWN';
+  }
+  
+  async startFeaturesJob(args: {
+    applicationId: string;
+    inputKey: string;
+    outputKey: string;
+  }) {
+    const jobName = this.config.getOrThrow<string>('AWS_GLUE_FEATURES_JOB_NAME');
+
+    const command = new StartJobRunCommand({
+      JobName: jobName,
+      Arguments: {
+        '--BUCKET': this.config.getOrThrow<string>('AWS_S3_BUCKET'),
+        '--APPLICATION_ID': args.applicationId,
+        '--INPUT_KEY': args.inputKey,
+        '--OUTPUT_KEY': args.outputKey,
+      },
+    });
+
+    const response = await this.client.send(command);
+    return {
+      jobName,
+      jobRunId: response.JobRunId!,
+    };
   }
 }

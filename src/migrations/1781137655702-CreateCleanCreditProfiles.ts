@@ -1,8 +1,9 @@
-import { MigrationInterface, QueryRunner } from "typeorm";
+import { MigrationInterface, QueryRunner } from 'typeorm';
 
-export class CreateCleanCreditProfiles1781137655702 implements MigrationInterface {
-
-    name = 'CreateCleanCreditProfiles1781137655702';
+export class CreateCleanCreditProfiles1781137655702
+  implements MigrationInterface
+{
+  name = 'CreateCleanCreditProfiles1781137655702';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     const schema = process.env.DATABASE_SCHEMA ?? 'public';
@@ -26,6 +27,7 @@ export class CreateCleanCreditProfiles1781137655702 implements MigrationInterfac
         "property_value" numeric(14,2),
         "reported_total_debt" numeric(14,2),
         "monthly_debt_payment" numeric(14,2),
+        "monthly_expenses" numeric(14,2),
         "active_loan_count" integer,
         "has_late_payments" boolean,
         "estimated_monthly_payment" numeric(14,2),

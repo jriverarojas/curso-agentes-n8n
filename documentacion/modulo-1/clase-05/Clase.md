@@ -624,6 +624,7 @@ En Clase 4 terminamos con un perfil limpio:
 {
   "net_monthly_income": 8500,
   "monthly_debt_payment": 1800,
+  "monthly_expenses": 4200,
   "requested_amount": 450000,
   "property_value": 600000,
   "estimated_monthly_payment": 3000,
@@ -639,6 +640,8 @@ En Clase 5 queremos generar variables como estas:
   "debt_to_income_ratio": 0.2118,
   "loan_to_value_ratio": 0.75,
   "payment_to_income_ratio": 0.3529,
+  "expense_to_income_ratio": 0.4941,
+  "total_obligations_to_income_ratio": 1.0588,
   "credit_history_score": 80
 }
 ```
@@ -650,6 +653,8 @@ En Clase 5 queremos generar variables como estas:
 | `debt_to_income_ratio` | deuda mensual / ingreso mensual | Qué parte del ingreso ya está comprometida |
 | `loan_to_value_ratio` | monto solicitado / valor del inmueble | Qué porcentaje del inmueble se financia |
 | `payment_to_income_ratio` | cuota estimada / ingreso mensual | Qué parte del ingreso se iría a la nueva cuota |
+| `expense_to_income_ratio` | gastos mensuales / ingreso mensual | Qué parte del ingreso se consume en gastos declarados |
+| `total_obligations_to_income_ratio` | (deuda + gastos + nueva cuota) / ingreso | Presión mensual total sobre el ingreso |
 | `credit_history_score` | puntaje sintético desde mora y créditos activos | Señal simple de historial |
 
 Ejemplo:
@@ -658,6 +663,8 @@ Ejemplo:
 debt_to_income_ratio = 1800 / 8500 = 0.2118
 loan_to_value_ratio = 450000 / 600000 = 0.75
 payment_to_income_ratio = 3000 / 8500 = 0.3529
+expense_to_income_ratio = 4200 / 8500 = 0.4941
+total_obligations_to_income_ratio = (1800 + 4200 + 3000) / 8500 = 1.0588
 ```
 
 Estas variables son mejores para un modelo porque:
@@ -709,6 +716,8 @@ export class CreateCreditFeatureSets1780000000002
         "debt_to_income_ratio" numeric(8,4),
         "loan_to_value_ratio" numeric(8,4),
         "payment_to_income_ratio" numeric(8,4),
+        "expense_to_income_ratio" numeric(8,4),
+        "total_obligations_to_income_ratio" numeric(8,4),
         "employment_stability_score" numeric(8,2),
         "banking_capacity_score" numeric(8,2),
         "credit_history_score" numeric(8,2),
@@ -766,6 +775,12 @@ export class CreditFeatureSet {
 
   @Column({ name: 'payment_to_income_ratio', type: 'numeric', nullable: true })
   paymentToIncomeRatio?: number;
+
+  @Column({ name: 'expense_to_income_ratio', type: 'numeric', nullable: true })
+  expenseToIncomeRatio?: number;
+
+  @Column({ name: 'total_obligations_to_income_ratio', type: 'numeric', nullable: true })
+  totalObligationsToIncomeRatio?: number;
 
   @Column({ name: 'employment_stability_score', type: 'numeric', nullable: true })
   employmentStabilityScore?: number;
@@ -836,6 +851,12 @@ def safe_divide(a, b):
         return None
     return round(float(a) / float(b), 4)
 
+def sum_known(*values):
+    known_values = [float(value) for value in values if value is not None]
+    if not known_values:
+        return None
+    return sum(known_values)
+
 def score_employment(months):
     if months is None:
         return 40
@@ -871,6 +892,7 @@ clean = payload.get("clean", payload)
 
 income = clean.get("net_monthly_income")
 monthly_debt = clean.get("monthly_debt_payment")
+monthly_expenses = clean.get("monthly_expenses")
 requested_amount = clean.get("requested_amount")
 property_value = clean.get("property_value")
 estimated_payment = clean.get("estimated_monthly_payment")
@@ -878,11 +900,13 @@ employment_months = clean.get("employment_tenure_months")
 avg_balance = clean.get("average_monthly_balance")
 has_late = clean.get("has_late_payments")
 active_loans = clean.get("active_loan_count")
+total_monthly_obligations = sum_known(monthly_debt, monthly_expenses, estimated_payment)
 
 features = {
     "application_id": args["APPLICATION_ID"],
     "net_monthly_income": income,
     "monthly_debt_payment": monthly_debt,
+    "monthly_expenses": monthly_expenses,
     "property_value": property_value,
     "requested_amount": requested_amount,
     "requested_term_months": clean.get("requested_term_months"),
@@ -890,6 +914,8 @@ features = {
     "debt_to_income_ratio": safe_divide(monthly_debt, income),
     "loan_to_value_ratio": safe_divide(requested_amount, property_value),
     "payment_to_income_ratio": safe_divide(estimated_payment, income),
+    "expense_to_income_ratio": safe_divide(monthly_expenses, income),
+    "total_obligations_to_income_ratio": safe_divide(total_monthly_obligations, income),
     "employment_stability_score": score_employment(employment_months),
     "banking_capacity_score": score_banking(avg_balance, income),
     "credit_history_score": score_history(has_late, active_loans),
@@ -912,6 +938,8 @@ schema = {
         "debt_to_income_ratio",
         "loan_to_value_ratio",
         "payment_to_income_ratio",
+        "expense_to_income_ratio",
+        "total_obligations_to_income_ratio",
         "employment_stability_score",
         "banking_capacity_score",
         "credit_history_score",
@@ -1082,6 +1110,8 @@ export class Clase05Service {
         debtToIncomeRatio: features.debt_to_income_ratio,
         loanToValueRatio: features.loan_to_value_ratio,
         paymentToIncomeRatio: features.payment_to_income_ratio,
+        expenseToIncomeRatio: features.expense_to_income_ratio,
+        totalObligationsToIncomeRatio: features.total_obligations_to_income_ratio,
         employmentStabilityScore: features.employment_stability_score,
         bankingCapacityScore: features.banking_capacity_score,
         creditHistoryScore: features.credit_history_score,

@@ -56,6 +56,9 @@ export class CleanCreditProfile {
   @Column({ name: 'monthly_debt_payment', type: 'numeric', nullable: true })
   monthlyDebtPayment?: number;
 
+  @Column({ name: 'monthly_expenses', type: 'numeric', nullable: true })
+  monthlyExpenses?: number;
+
   @Column({ name: 'active_loan_count', type: 'integer', nullable: true })
   activeLoanCount?: number;
 

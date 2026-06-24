@@ -22,6 +22,10 @@ import { Clase04Controller } from './clase04/clase04.controller';
 import { Clase04Service } from './clase04/clase04.service';
 import { GlueService } from './clase04/glue.service';
 
+import { CreditFeatureSet } from '../entities/credit-feature-set.entity';
+import { Clase05Controller } from './clase05/clase05.controller';
+import { Clase05Service } from './clase05/clase05.service';
+
 @Module({
   imports: [
     AuthModule,
@@ -35,10 +39,11 @@ import { GlueService } from './clase04/glue.service';
       ApplicationExtractedData,
       CleanCreditProfile,
       GlueJobRunEntity,
+      CreditFeatureSet,
     ]),
   ],
-  controllers: [Clase01Controller, Clase02Controller, Clase03Controller, Clase04Controller ],
-  providers: [Clase01Service, Clase02Service, Clase03Service, Clase04Service, TextractService, GlueService],
+  controllers: [Clase01Controller, Clase02Controller, Clase03Controller, Clase04Controller, Clase05Controller],
+  providers: [Clase01Service, Clase02Service, Clase03Service, Clase04Service, Clase05Service, TextractService, GlueService],
   exports: [Clase03Service],
 })
 export class Modulo1Module {}

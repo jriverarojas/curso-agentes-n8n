@@ -491,7 +491,7 @@ for item in ["20 anos (240 meses)", "5 años", "18 meses", None]:
 Archivo: `scripts/clase04/test_get_value.py`
 
 ```python
-def get_value(section, alias, threshold=80):
+def get_value(section, alias, threshold=70):
     # Busca un campo dentro de una sección del expediente limpio por Clase 3.
     item = (section or {}).get(alias)
 
@@ -515,7 +515,7 @@ for field in ["employee_name", "employer_name", "declared_salary"]:
     print(f"{field} -> {get_value(employment, field)}")
 ```
 
-Observa que con umbral `80`, `employer_name` y `declared_salary` quedan en `None`. Eso no significa que el dato no exista, sino que su confianza es baja. En un sistema real podríamos mandarlo a revisión o bajar el umbral para ciertos campos.
+Observa que con umbral `70`, algunos datos de confianza media pueden pasar, pero respuestas muy bajas siguen quedando en `None`. Eso no significa necesariamente que el dato no exista, sino que el sistema no confía lo suficiente en esa extracción. En un sistema real podríamos mandarlo a revisión o definir umbrales distintos por campo.
 
 ### 3. AWS Glue en la cuenta del curso
 
@@ -753,6 +753,7 @@ credit = raw.get("creditHistoryData", {})
 
 net_income = clean_money(get_value(income, "net_monthly_income"))
 monthly_debt = clean_money(get_value(credit, "monthly_debt_payment"))
+monthly_expenses = clean_money(get_value(loan, "monthly_expenses"))
 requested_amount = clean_money(get_value(loan, "requested_amount"))
 term_months = clean_months(get_value(loan, "requested_term_months")) or 240
 estimated_payment = round(requested_amount / term_months, 2) if requested_amount else None
@@ -773,6 +774,7 @@ clean = {
     "property_value": clean_money(get_value(loan, "property_value")),
     "reported_total_debt": clean_money(get_value(credit, "reported_total_debt")),
     "monthly_debt_payment": monthly_debt,
+    "monthly_expenses": monthly_expenses,
     "active_loan_count": clean_int(get_value(credit, "active_loan_count")),
     "has_late_payments": clean_bool(get_value(credit, "has_late_payments")),
     "estimated_monthly_payment": estimated_payment,
@@ -797,7 +799,7 @@ Para probarlo manualmente (consola Glue), parámetros de ejemplo para `grupo1`:
 --APPLICATION_ID=APPLICATION_ID
 --INPUT_KEY=clean/credit-files/APPLICATION_ID/extracted-data.json
 --OUTPUT_KEY=clean/credit-files/APPLICATION_ID/clean-profile.json
---CONFIDENCE_THRESHOLD=80
+--CONFIDENCE_THRESHOLD=70
 ```
 
 Usa tu `AWS_S3_BUCKET` como `--BUCKET` y el prefijo `AWS_S3_CLEAN_PREFIX` (`clean/credit-files`).
@@ -872,6 +874,7 @@ export class CreateCleanCreditProfiles1780000000001
         "property_value" numeric(14,2),
         "reported_total_debt" numeric(14,2),
         "monthly_debt_payment" numeric(14,2),
+        "monthly_expenses" numeric(14,2),
         "active_loan_count" integer,
         "has_late_payments" boolean,
         "estimated_monthly_payment" numeric(14,2),
@@ -980,6 +983,9 @@ export class CleanCreditProfile {
 
   @Column({ name: 'monthly_debt_payment', type: 'numeric', nullable: true })
   monthlyDebtPayment?: number;
+
+  @Column({ name: 'monthly_expenses', type: 'numeric', nullable: true })
+  monthlyExpenses?: number;
 
   @Column({ name: 'active_loan_count', type: 'integer', nullable: true })
   activeLoanCount?: number;
@@ -1094,7 +1100,7 @@ export class GlueService {
         '--APPLICATION_ID': args.applicationId,
         '--INPUT_KEY': args.inputKey,
         '--OUTPUT_KEY': args.outputKey,
-        '--CONFIDENCE_THRESHOLD': '80',
+        '--CONFIDENCE_THRESHOLD': '70',
       },
     });
 
@@ -1314,6 +1320,7 @@ export class Clase04Service {
         propertyValue: clean.property_value,
         reportedTotalDebt: clean.reported_total_debt,
         monthlyDebtPayment: clean.monthly_debt_payment,
+        monthlyExpenses: clean.monthly_expenses,
         activeLoanCount: clean.active_loan_count,
         hasLatePayments: clean.has_late_payments,
         estimatedMonthlyPayment: clean.estimated_monthly_payment,

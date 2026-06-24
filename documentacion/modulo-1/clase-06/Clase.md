@@ -15,10 +15,13 @@ Al terminar esta sesión podrás:
 - Explicar qué es un modelo de clasificación de riesgo.
 - Entender conceptualmente cómo funciona una regresión logística.
 - Entender términos como `features`, `target`, `label`, `training`, `test`, `probability`, `threshold`, `coefficients`, `intercept`, `scaler`, `AUC`, `precision` y `recall`.
+- Ver con un ejemplo simple cómo un modelo aprende que una variable pesa más que otras.
+- Identificar los datos mínimos que necesitamos leer desde documentos para usar el modelo de riesgo.
 - Crear un dataset sintético con reglas de negocio razonables.
-- Entrenar el modelo de riesgo desde un notebook.
-- Entrenar el modelo desde un endpoint NestJS usando SageMaker Training Jobs.
-- Probar el modelo desde notebook y desde NestJS.
+- Entrenar y probar primero en un notebook local con Docker.
+- Generar localmente `risk_metrics.json` y `risk_model_params.json`, subirlos a S3 y usarlos desde NestJS.
+- Dejar preparado el endpoint de entrenamiento en SageMaker para cuando AWS habilite las quotas.
+- Probar el modelo desde notebook local y desde NestJS.
 
 ---
 
@@ -33,6 +36,8 @@ En Clase 5 creamos variables listas para modelos:
   "debt_to_income_ratio": 0.2118,
   "loan_to_value_ratio": 0.75,
   "payment_to_income_ratio": 0.3529,
+  "expense_to_income_ratio": 0.4941,
+  "total_obligations_to_income_ratio": 1.0588,
   "credit_history_score": 80
 }
 ```
@@ -57,6 +62,151 @@ El modelo no aprueba ni rechaza créditos. Solo devuelve una señal:
   "default_probability": 0.27,
   "risk_label": "LOW"
 }
+```
+
+### Demostración inicial: el modelo del paraguas
+
+Antes de entrar al crédito, haremos una mini demostración con el ejemplo de Clase 5:
+
+```txt
+¿Debería llevar paraguas?
+```
+
+Un alumno preguntó algo muy importante:
+
+> "¿Qué pasa si una variable afecta mucho al modelo?"
+
+Para responderlo, entrenaremos un modelo simple donde `rain_probability` tiene una señal más fuerte que las demás variables.
+
+Variables:
+
+| Feature | Qué representa |
+|---------|----------------|
+| `rain_probability` | Probabilidad estimada de lluvia |
+| `humidity` | Humedad |
+| `cloudiness` | Nubosidad |
+| `wind_speed` | Velocidad del viento |
+| `is_rainy_season` | Si estamos en estación lluviosa |
+
+La idea que queremos demostrar:
+
+```txt
+Si rain_probability cambia mucho y todo lo demás queda casi igual,
+el modelo debería cambiar fuerte su probabilidad de "llevar paraguas".
+```
+
+### Qué hace el script de paraguas
+
+El archivo `train_umbrella_logistic_demo.py` hace todo en pequeño para que se vea completo:
+
+1. Crea un dataset sintético de **800 registros**.
+2. Cada registro representa un día simulado.
+3. Cada día tiene estas columnas:
+
+```txt
+rain_probability
+humidity
+cloudiness
+wind_speed
+is_rainy_season
+take_umbrella
+```
+
+La columna que queremos predecir es:
+
+```txt
+take_umbrella
+```
+
+Donde:
+
+```txt
+0 -> no llevar paraguas
+1 -> llevar paraguas
+```
+
+El script genera los datos con una regla intencional:
+
+```txt
+rain_probability influye más fuerte que las demás variables.
+```
+
+En otras palabras, no estamos creando datos totalmente aleatorios. Estamos creando un mundo didáctico donde la probabilidad de lluvia tiene mucho peso.
+
+Después el script entrena una regresión logística:
+
+```txt
+800 días simulados -> StandardScaler -> LogisticRegression -> coeficientes -> predicciones
+```
+
+Qué hace cada parte:
+
+| Parte | Qué hace |
+|-------|----------|
+| `make_dataset()` | crea los 800 días simulados |
+| `StandardScaler()` | pone las variables en escalas comparables |
+| `LogisticRegression()` | aprende pesos para decidir si llevar paraguas |
+| `model.fit(...)` | entrena el modelo con los datos |
+| `coef_` | muestra qué peso aprendió para cada variable |
+| `predict_proba(...)` | devuelve probabilidad de llevar paraguas |
+
+Esta demo se ejecuta **dentro del notebook local en Docker**, no en SageMaker.
+
+Primero abre JupyterLab local con el comando Docker de la parte práctica. Luego crea una celda en el notebook y ejecuta:
+
+```python
+%run train_umbrella_logistic_demo.py
+```
+
+El resultado imprimirá dos cosas en la salida de la celda:
+
+- los coeficientes aprendidos por el modelo;
+- dos predicciones donde solo cambia `rain_probability`.
+
+La salida se verá parecido a esto:
+
+```txt
+Coeficientes aprendidos:
+          feature  coefficient
+ rain_probability        2.10
+        humidity        0.45
+      cloudiness        0.32
+ is_rainy_season        0.20
+      wind_speed        0.08
+
+Mismo dia, solo cambia rain_probability:
+rain_probability = 0.15 -> 0.28
+rain_probability = 0.85 -> 0.91
+```
+
+Los números exactos pueden variar un poco, pero la idea debería mantenerse:
+
+```txt
+rain_probability tiene un coeficiente mayor
+y al subirla la probabilidad final aumenta bastante.
+```
+
+Cómo demostrarlo:
+
+1. Mira la tabla de coeficientes.
+2. Busca la fila `rain_probability`.
+3. Compara su valor absoluto contra los demás coeficientes.
+4. Luego mira las dos predicciones:
+
+```txt
+rain_probability = 0.15 -> probabilidad baja/media de llevar paraguas
+rain_probability = 0.85 -> probabilidad mucho más alta de llevar paraguas
+```
+
+Si `rain_probability` aparece con el coeficiente más alto o uno de los más altos, eso significa que el modelo aprendió que esa variable empuja fuerte la decisión.
+
+Importante: como usamos `StandardScaler`, los coeficientes ya son más comparables entre sí. Por eso podemos decir: "este coeficiente pesa más que este otro" con más confianza que si las variables estuvieran en escalas muy distintas.
+
+Eso conecta directo con crédito:
+
+```txt
+El modelo no adivina qué variable importa.
+Lo aprende desde los patrones que aparecen en los datos de entrenamiento.
 ```
 
 ### 2. Vocabulario esencial
@@ -86,6 +236,56 @@ features = variables crediticias
 target = default_flag
 label = 0 o 1
 ```
+
+### Datos mínimos que necesita el modelo de riesgo
+
+Para usar el modelo de regresión logística necesitamos enviarle las mismas variables con las que fue entrenado.
+
+Estas variables no salen mágicamente: vienen de los documentos, del formulario y de la limpieza de Clase 4.
+
+| Dato mínimo | Variable limpia que necesitamos | De dónde puede venir | Para qué sirve |
+|-------------|-------------------------------|----------------------|----------------|
+| Ingreso neto mensual | `net_monthly_income` | solicitud, boleta o certificado laboral | Base para comparar deuda, gastos y cuota |
+| Pago mensual de deudas | `monthly_debt_payment` | reporte crediticio | Permite calcular `debt_to_income_ratio` |
+| Gastos mensuales declarados | `monthly_expenses` | formulario de solicitud | Permite calcular `expense_to_income_ratio` |
+| Monto solicitado | `requested_amount` | solicitud de crédito | Permite calcular LTV y cuota estimada |
+| Valor del inmueble | `property_value` | solicitud, avalúo o formulario | Permite calcular `loan_to_value_ratio` |
+| Plazo solicitado | `requested_term_months` | solicitud | Permite estimar `estimated_monthly_payment` |
+| Cuota estimada | `estimated_monthly_payment` | cálculo interno desde monto y plazo | Permite calcular `payment_to_income_ratio` |
+| Antigüedad laboral | `employment_tenure_months` | certificado laboral | Permite crear `employment_stability_score` |
+| Saldo promedio bancario | `average_monthly_balance` | extracto bancario | Permite crear `banking_capacity_score` |
+| Cantidad de créditos activos | `active_loan_count` | reporte crediticio | Ayuda a construir `credit_history_score` |
+| Mora o pagos atrasados | `has_late_payments` | reporte crediticio | Señal fuerte para `credit_history_score` |
+
+Con esos datos construimos features como:
+
+| Feature del modelo | Cómo se construye |
+|--------------------|-------------------|
+| `debt_to_income_ratio` | deuda mensual / ingreso neto |
+| `loan_to_value_ratio` | monto solicitado / valor inmueble |
+| `payment_to_income_ratio` | cuota estimada / ingreso neto |
+| `expense_to_income_ratio` | gastos mensuales / ingreso neto |
+| `total_obligations_to_income_ratio` | deuda + gastos + nueva cuota / ingreso neto |
+| `employment_stability_score` | score desde meses de antigüedad laboral |
+| `banking_capacity_score` | score desde saldo promedio relativo al ingreso |
+| `credit_history_score` | score desde mora y créditos activos |
+
+Variables finales que el modelo espera recibir sí o sí:
+
+```txt
+debt_to_income_ratio
+loan_to_value_ratio
+payment_to_income_ratio
+expense_to_income_ratio
+total_obligations_to_income_ratio
+employment_stability_score
+banking_capacity_score
+credit_history_score
+```
+
+Punto clave:
+
+> El modelo recibe features, pero el sistema necesita documentos para poder construir esas features.
 
 ### 3. Clasificación, regresión y clustering
 
@@ -151,6 +351,8 @@ Imagina que el modelo recibe estas variables:
   "debt_to_income_ratio": 0.50,
   "loan_to_value_ratio": 0.90,
   "payment_to_income_ratio": 0.45,
+  "expense_to_income_ratio": 0.55,
+  "total_obligations_to_income_ratio": 1.50,
   "employment_stability_score": 35,
   "banking_capacity_score": 40,
   "credit_history_score": 45
@@ -177,6 +379,8 @@ Ejemplo conceptual:
 | `debt_to_income_ratio` alto | 0.50 | sube riesgo |
 | `loan_to_value_ratio` alto | 0.90 | sube riesgo |
 | `payment_to_income_ratio` alto | 0.45 | sube riesgo |
+| `expense_to_income_ratio` alto | 0.55 | sube riesgo |
+| `total_obligations_to_income_ratio` alto | 1.50 | sube riesgo |
 | `employment_stability_score` bajo | 35 | sube riesgo |
 | `credit_history_score` bajo | 45 | sube riesgo |
 
@@ -187,6 +391,8 @@ Otro caso:
 | `debt_to_income_ratio` bajo | 0.18 | baja riesgo |
 | `loan_to_value_ratio` moderado | 0.65 | baja riesgo |
 | `payment_to_income_ratio` bajo | 0.20 | baja riesgo |
+| `expense_to_income_ratio` moderado | 0.35 | baja riesgo |
+| `total_obligations_to_income_ratio` moderado | 0.73 | baja riesgo |
 | `employment_stability_score` alto | 100 | baja riesgo |
 | `credit_history_score` alto | 95 | baja riesgo |
 
@@ -200,6 +406,7 @@ Ejemplo inventado:
 |---------|-------------|-----------------------|
 | `debt_to_income_ratio` | `+1.8` | Si sube, aumenta el riesgo |
 | `loan_to_value_ratio` | `+1.2` | Si sube, aumenta el riesgo |
+| `total_obligations_to_income_ratio` | `+1.5` | Si sube, aumenta el riesgo |
 | `credit_history_score` | `-0.9` | Si sube, reduce el riesgo |
 | `employment_stability_score` | `-0.6` | Si sube, reduce el riesgo |
 
@@ -341,6 +548,8 @@ Caso de menor riesgo:
   "debt_to_income_ratio": 0.18,
   "loan_to_value_ratio": 0.60,
   "payment_to_income_ratio": 0.20,
+  "expense_to_income_ratio": 0.35,
+  "total_obligations_to_income_ratio": 0.73,
   "employment_stability_score": 100,
   "banking_capacity_score": 90,
   "credit_history_score": 95
@@ -354,6 +563,8 @@ Caso de mayor riesgo:
   "debt_to_income_ratio": 0.62,
   "loan_to_value_ratio": 0.95,
   "payment_to_income_ratio": 0.55,
+  "expense_to_income_ratio": 0.65,
+  "total_obligations_to_income_ratio": 1.82,
   "employment_stability_score": 35,
   "banking_capacity_score": 30,
   "credit_history_score": 40
@@ -368,33 +579,50 @@ Esperamos que el segundo caso tenga mayor `default_probability`.
 
 La práctica tendrá dos caminos:
 
-1. Notebook: entrenar y probar el modelo de forma visible.
-2. NestJS: iniciar entrenamiento, consultar estado, consultar métricas y probar una predicción desde la API.
+1. Notebook local en Docker: entrenar y probar el modelo de forma visible.
+2. S3 + NestJS: subir `risk_model_params.json` generado localmente y probar una predicción desde la API.
+3. SageMaker Training Job: opcional, cuando la cuenta tenga quotas aprobadas.
 
 ```mermaid
 flowchart TD
-  A["Dataset sintético"] --> B["Notebook"]
-  A --> C["SageMaker Training Job desde NestJS"]
-  B --> D["Métricas y pruebas"]
-  C --> E["Estado y métricas desde API"]
-  D --> F["Parámetros del modelo"]
-  E --> F
-  F --> G["Predicción desde NestJS"]
+  A["Dataset sintético"] --> B["Notebook local Docker"]
+  B --> C["risk_metrics.json"]
+  B --> D["risk_model_params.json"]
+  C --> E["S3"]
+  D --> E
+  E --> F["Predicción desde NestJS"]
+  A -. cuando haya quotas .-> G["SageMaker Training Job desde NestJS"]
+  G -. genera artefactos .-> E
 ```
 
-### 1. Instala librerías para notebook o local
+### 1. Abre JupyterLab local con Docker
 
-Si trabajas localmente:
+Como no usaremos notebooks de AWS en esta clase, haremos las pruebas visibles en un notebook local usando Docker.
+
+Desde la raíz del proyecto en macOS o Linux:
 
 ```bash
-python3 -m pip install numpy pandas scikit-learn joblib
+docker run --rm -p 8888:8888 \
+  -v "$PWD":/home/jovyan/work \
+  quay.io/jupyter/scipy-notebook:latest \
+  start-notebook.py --ServerApp.root_dir=/home/jovyan/work
 ```
 
-Si trabajas en notebook:
+En Windows PowerShell:
+
+```powershell
+docker run --rm -p 8888:8888 -v "${PWD}:/home/jovyan/work" quay.io/jupyter/scipy-notebook:latest start-notebook.py --ServerApp.root_dir=/home/jovyan/work
+```
+
+Abre la URL con token que aparece en la terminal y crea un notebook nuevo.
+
+Dentro del notebook, si hiciera falta instalar algo:
 
 ```python
 %pip install numpy pandas scikit-learn joblib
 ```
+
+En este notebook haremos solo pruebas locales. El entrenamiento en AWS lo dispararemos después desde NestJS.
 
 ### 2. Genera el dataset sintético
 
@@ -412,6 +640,8 @@ El CSV tendrá columnas como:
 debt_to_income_ratio
 loan_to_value_ratio
 payment_to_income_ratio
+expense_to_income_ratio
+total_obligations_to_income_ratio
 employment_stability_score
 banking_capacity_score
 credit_history_score
@@ -448,6 +678,8 @@ df[[
     "debt_to_income_ratio",
     "loan_to_value_ratio",
     "payment_to_income_ratio",
+    "expense_to_income_ratio",
+    "total_obligations_to_income_ratio",
     "employment_stability_score",
     "banking_capacity_score",
     "credit_history_score",
@@ -462,6 +694,8 @@ df.groupby("default_flag")[[
     "debt_to_income_ratio",
     "loan_to_value_ratio",
     "payment_to_income_ratio",
+    "expense_to_income_ratio",
+    "total_obligations_to_income_ratio",
     "employment_stability_score",
     "banking_capacity_score",
     "credit_history_score",
@@ -488,6 +722,8 @@ features = [
     "debt_to_income_ratio",
     "loan_to_value_ratio",
     "payment_to_income_ratio",
+    "expense_to_income_ratio",
+    "total_obligations_to_income_ratio",
     "employment_stability_score",
     "banking_capacity_score",
     "credit_history_score",
@@ -562,6 +798,8 @@ low_risk = pd.DataFrame([{
     "debt_to_income_ratio": 0.18,
     "loan_to_value_ratio": 0.60,
     "payment_to_income_ratio": 0.20,
+    "expense_to_income_ratio": 0.35,
+    "total_obligations_to_income_ratio": 0.73,
     "employment_stability_score": 100,
     "banking_capacity_score": 90,
     "credit_history_score": 95,
@@ -571,6 +809,8 @@ high_risk = pd.DataFrame([{
     "debt_to_income_ratio": 0.62,
     "loan_to_value_ratio": 0.95,
     "payment_to_income_ratio": 0.55,
+    "expense_to_income_ratio": 0.65,
+    "total_obligations_to_income_ratio": 1.82,
     "employment_stability_score": 35,
     "banking_capacity_score": 30,
     "credit_history_score": 40,
@@ -621,6 +861,8 @@ Este script:
     "debt_to_income_ratio",
     "loan_to_value_ratio",
     "payment_to_income_ratio",
+    "expense_to_income_ratio",
+    "total_obligations_to_income_ratio",
     "employment_stability_score",
     "banking_capacity_score",
     "credit_history_score"
@@ -635,6 +877,16 @@ Este script:
 }
 ```
 
+### 8. Sube el modelo local a S3
+
+Este es el camino principal de la clase si SageMaker todavía no tiene quotas aprobadas.
+
+Aunque el modelo se entrenó localmente, NestJS puede usarlo porque lo que necesita para predecir está en:
+
+```txt
+risk_model_params.json
+```
+
 Sube métricas y parámetros a S3:
 
 ```bash
@@ -643,9 +895,38 @@ aws s3 cp risk_metrics.json s3://TU_BUCKET/ml/metrics/risk_metrics.json
 aws s3 cp risk_model_params.json s3://TU_BUCKET/ml/models/risk/risk_model_params.json
 ```
 
-### 8. Variables de entorno
+Con eso ya puedes usar:
 
-Instala el SDK de SageMaker:
+```txt
+GET  /modulo1/clase06/sagemaker/models/risk/metrics
+POST /modulo1/clase06/models/risk/predict
+```
+
+sin haber ejecutado todavía un SageMaker Training Job.
+
+La idea es:
+
+```txt
+Entrenamiento local Docker -> JSON en S3 -> predicción en NestJS
+```
+
+Más adelante, cuando AWS apruebe las quotas, el endpoint de training podrá generar esos mismos artefactos desde SageMaker:
+
+```txt
+Entrenamiento SageMaker -> JSON en S3 -> predicción en NestJS
+```
+
+### 9. Variables de entorno
+
+Para la predicción con JSON en S3 necesitas:
+
+```env
+SAGEMAKER_BUCKET=TU_BUCKET
+SAGEMAKER_RISK_METRICS_KEY=ml/metrics/risk_metrics.json
+SAGEMAKER_RISK_MODEL_PARAMS_KEY=ml/models/risk/risk_model_params.json
+```
+
+Para el entrenamiento futuro en SageMaker también necesitarás instalar el SDK:
 
 ```bash
 npm install @aws-sdk/client-sagemaker
@@ -661,16 +942,17 @@ SAGEMAKER_RISK_METRICS_KEY=ml/metrics/risk_metrics.json
 SAGEMAKER_RISK_MODEL_PARAMS_KEY=ml/models/risk/risk_model_params.json
 ```
 
-El endpoint de NestJS usa `CreateTrainingJob`. Para que SageMaker ejecute `train_risk_logistic.py`, la imagen indicada en `SAGEMAKER_RISK_TRAINING_IMAGE` debe contener o ejecutar ese script.
+El endpoint de training de NestJS usa `CreateTrainingJob`. Para que SageMaker ejecute `train_risk_logistic.py`, la imagen indicada en `SAGEMAKER_RISK_TRAINING_IMAGE` debe contener o ejecutar ese script.
 
 En esta clase hay dos niveles:
 
 | Nivel | Qué hacemos |
 |-------|-------------|
-| Notebook/local | Entrenamos y probamos rápidamente |
-| NestJS + SageMaker | Iniciamos entrenamiento asíncrono y consultamos estado |
+| Notebook local Docker | Entrenamos y generamos `risk_model_params.json` |
+| S3 + NestJS | Subimos el JSON y predecimos desde la API |
+| NestJS + SageMaker | Opcional cuando AWS apruebe quotas |
 
-### 9. Crea `SageMakerTrainingService`
+### 10. Crea `SageMakerTrainingService`
 
 Archivo: `src/modulo1/clase06/sagemaker-training.service.ts`
 
@@ -757,7 +1039,7 @@ export class SageMakerTrainingService {
 }
 ```
 
-### 10. Crea `Clase06Service`
+### 11. Crea `Clase06Service`
 
 Archivo: `src/modulo1/clase06/clase06.service.ts`
 
@@ -771,6 +1053,8 @@ type RiskFeatures = {
   debt_to_income_ratio: number;
   loan_to_value_ratio: number;
   payment_to_income_ratio: number;
+  expense_to_income_ratio: number;
+  total_obligations_to_income_ratio: number;
   employment_stability_score: number;
   banking_capacity_score: number;
   credit_history_score: number;
@@ -858,7 +1142,7 @@ export class Clase06Service {
 }
 ```
 
-### 11. Crea el controller
+### 12. Crea el controller
 
 Archivo: `src/modulo1/clase06/clase06.controller.ts`
 
@@ -894,6 +1178,8 @@ export class Clase06Controller {
       debt_to_income_ratio: number;
       loan_to_value_ratio: number;
       payment_to_income_ratio: number;
+      expense_to_income_ratio: number;
+      total_obligations_to_income_ratio: number;
       employment_stability_score: number;
       banking_capacity_score: number;
       credit_history_score: number;
@@ -904,7 +1190,7 @@ export class Clase06Controller {
 }
 ```
 
-### 12. Actualiza `Modulo1Module`
+### 13. Actualiza `Modulo1Module`
 
 Agrega:
 
@@ -938,23 +1224,9 @@ providers: [
 ],
 ```
 
-### 13. Prueba desde NestJS
+### 14. Prueba desde NestJS
 
-Iniciar entrenamiento:
-
-```bash
-curl -X POST http://localhost:3000/modulo1/clase06/sagemaker/train-risk \
-  -H "x-api-key: test1" \
-  -H "x-api-secret: pass1"
-```
-
-Consultar estado:
-
-```bash
-curl http://localhost:3000/modulo1/clase06/sagemaker/train-risk/JOB_NAME \
-  -H "x-api-key: test1" \
-  -H "x-api-secret: pass1"
-```
+Primero prueba métricas y predicción usando los JSON generados localmente y subidos a S3.
 
 Consultar métricas:
 
@@ -975,6 +1247,8 @@ curl -X POST http://localhost:3000/modulo1/clase06/models/risk/predict \
     "debt_to_income_ratio": 0.18,
     "loan_to_value_ratio": 0.60,
     "payment_to_income_ratio": 0.20,
+    "expense_to_income_ratio": 0.35,
+    "total_obligations_to_income_ratio": 0.73,
     "employment_stability_score": 100,
     "banking_capacity_score": 90,
     "credit_history_score": 95
@@ -992,6 +1266,8 @@ curl -X POST http://localhost:3000/modulo1/clase06/models/risk/predict \
     "debt_to_income_ratio": 0.62,
     "loan_to_value_ratio": 0.95,
     "payment_to_income_ratio": 0.55,
+    "expense_to_income_ratio": 0.65,
+    "total_obligations_to_income_ratio": 1.82,
     "employment_stability_score": 35,
     "banking_capacity_score": 30,
     "credit_history_score": 40
@@ -1000,12 +1276,29 @@ curl -X POST http://localhost:3000/modulo1/clase06/models/risk/predict \
 
 La segunda respuesta debería tener mayor `defaultProbability`.
 
+Cuando AWS ya tenga quotas aprobadas, recién prueba el entrenamiento en SageMaker:
+
+```bash
+curl -X POST http://localhost:3000/modulo1/clase06/sagemaker/train-risk \
+  -H "x-api-key: test1" \
+  -H "x-api-secret: pass1"
+```
+
+Consultar estado:
+
+```bash
+curl http://localhost:3000/modulo1/clase06/sagemaker/train-risk/JOB_NAME \
+  -H "x-api-key: test1" \
+  -H "x-api-secret: pass1"
+```
+
 ## Entrega
 
 - Captura del notebook entrenando regresión logística.
 - Resultado de métricas (`AUC`, `precision`, `recall`, matriz de confusión).
 - Evidencia de `risk_metrics.json`.
 - Evidencia de `risk_model_params.json`.
+- Evidencia de ambos archivos subidos a S3.
 - Prueba desde NestJS con un caso de menor riesgo y uno de mayor riesgo.
 - Explicación corta de por qué el segundo caso devuelve mayor probabilidad.
 

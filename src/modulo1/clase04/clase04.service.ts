@@ -185,6 +185,7 @@ export class Clase04Service {
         propertyValue: clean.property_value,
         reportedTotalDebt: clean.reported_total_debt,
         monthlyDebtPayment: clean.monthly_debt_payment,
+        monthlyExpenses: clean.monthly_expenses,
         activeLoanCount: clean.active_loan_count,
         hasLatePayments: clean.has_late_payments,
         estimatedMonthlyPayment: clean.estimated_monthly_payment,
