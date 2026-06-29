@@ -501,7 +501,7 @@ print("Model trained.")
 ```python
 predictions = model.predict(X_test)
 
-rmse = mean_squared_error(y_test, predictions, squared=False)
+rmse = np.sqrt(mean_squared_error(y_test, predictions))
 mae = mean_absolute_error(y_test, predictions)
 r2 = r2_score(y_test, predictions)
 
