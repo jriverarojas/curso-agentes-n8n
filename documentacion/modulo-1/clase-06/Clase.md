@@ -6,7 +6,7 @@
 | **Duración** | 3 horas |
 | **Modelo** | Regresión logística para riesgo crediticio |
 | **Objetivo del modelo** | Predecir probabilidad de incumplimiento |
-| **Endpoints objetivo** | `POST /modulo1/clase06/sagemaker/train-risk`, `GET /modulo1/clase06/sagemaker/train-risk/:jobName`, `GET /modulo1/clase06/sagemaker/models/risk/metrics`, `POST /modulo1/clase06/models/risk/predict` |
+| **Endpoints objetivo** | `GET /modulo1/clase06/models/risk/metrics`, `POST /modulo1/clase06/applications/:applicationId/risk`, `POST /modulo1/clase06/models/risk/predict` |
 
 ## Objetivos
 
@@ -18,10 +18,11 @@ Al terminar esta sesión podrás:
 - Ver con un ejemplo simple cómo un modelo aprende que una variable pesa más que otras.
 - Identificar los datos mínimos que necesitamos leer desde documentos para usar el modelo de riesgo.
 - Crear un dataset sintético con reglas de negocio razonables.
-- Entrenar y probar primero en un notebook local con Docker.
-- Generar localmente `risk_metrics.json` y `risk_model_params.json`, subirlos a S3 y usarlos desde NestJS.
-- Dejar preparado el endpoint de entrenamiento en SageMaker para cuando AWS habilite las quotas.
-- Probar el modelo desde notebook local y desde NestJS.
+- Entrenar y probar el modelo en un notebook de SageMaker.
+- Generar `risk_metrics.json` y `risk_model_params.json` desde el notebook.
+- Subir esos JSON a S3 para que NestJS pueda usarlos.
+- Probar si un applicant es riesgoso desde NestJS usando las features creadas en Clase 5.
+- Entender que el entrenamiento desde NestJS es posible, pero queda fuera de esta práctica por restricciones de quotas.
 
 ---
 
@@ -150,9 +151,9 @@ Qué hace cada parte:
 | `coef_` | muestra qué peso aprendió para cada variable |
 | `predict_proba(...)` | devuelve probabilidad de llevar paraguas |
 
-Esta demo se ejecuta **dentro del notebook local en Docker**, no en SageMaker.
+Esta demo se ejecuta dentro de un notebook. Puede ser el notebook de SageMaker o el notebook local en Docker.
 
-Primero abre JupyterLab local con el comando Docker de la parte práctica. Luego crea una celda en el notebook y ejecuta:
+Primero abre JupyterLab, crea una celda y ejecuta:
 
 ```python
 %run train_umbrella_logistic_demo.py
@@ -577,62 +578,68 @@ Esperamos que el segundo caso tenga mayor `default_probability`.
 
 ## Parte práctica
 
-La práctica tendrá dos caminos:
+La práctica tendrá este flujo principal:
 
-1. Notebook local en Docker: entrenar y probar el modelo de forma visible.
-2. S3 + NestJS: subir `risk_model_params.json` generado localmente y probar una predicción desde la API.
-3. SageMaker Training Job: opcional, cuando la cuenta tenga quotas aprobadas.
+1. Notebook de SageMaker: entrenar y probar el modelo.
+2. S3: guardar `risk_metrics.json` y `risk_model_params.json`.
+3. NestJS: leer esos JSON y verificar si un applicant es riesgoso.
+
+El entrenamiento desde NestJS con SageMaker Training Jobs es posible, pero por ahora lo dejamos como explicación conceptual porque depende de quotas de SageMaker.
 
 ```mermaid
 flowchart TD
-  A["Dataset sintético"] --> B["Notebook local Docker"]
+  A["Dataset sintético en S3"] --> B["Notebook SageMaker"]
   B --> C["risk_metrics.json"]
   B --> D["risk_model_params.json"]
   C --> E["S3"]
   D --> E
-  E --> F["Predicción desde NestJS"]
-  A -. cuando haya quotas .-> G["SageMaker Training Job desde NestJS"]
-  G -. genera artefactos .-> E
+  E --> F["NestJS lee JSON"]
+  F --> G["Predicción de riesgo por applicationId"]
 ```
 
-### 1. Abre JupyterLab local con Docker
+### 1. Prepara el dataset en S3
 
-Como no usaremos notebooks de AWS en esta clase, haremos las pruebas visibles en un notebook local usando Docker.
+Primero genera el CSV sintético y súbelo al bucket del curso.
 
 Desde la raíz del proyecto en macOS o Linux:
-
-```bash
-docker run --rm -p 8888:8888 \
-  -v "$PWD":/home/jovyan/work \
-  quay.io/jupyter/scipy-notebook:latest \
-  start-notebook.py --ServerApp.root_dir=/home/jovyan/work
-```
-
-En Windows PowerShell:
-
-```powershell
-docker run --rm -p 8888:8888 -v "${PWD}:/home/jovyan/work" quay.io/jupyter/scipy-notebook:latest start-notebook.py --ServerApp.root_dir=/home/jovyan/work
-```
-
-Abre la URL con token que aparece en la terminal y crea un notebook nuevo.
-
-Dentro del notebook, si hiciera falta instalar algo:
-
-```python
-%pip install numpy pandas scikit-learn joblib
-```
-
-En este notebook haremos solo pruebas locales. El entrenamiento en AWS lo dispararemos después desde NestJS.
-
-### 2. Genera el dataset sintético
-
-Desde la raíz del proyecto:
 
 ```bash
 python3 generate_synthetic_mortgage_dataset.py \
   --rows 2000 \
   --output synthetic_mortgage_dataset.csv
+
+aws s3 cp synthetic_mortgage_dataset.csv \
+  s3://TU_BUCKET/synthetic_mortgage_dataset.csv
 ```
+
+Si usas el bucket docente:
+
+```bash
+aws s3 cp synthetic_mortgage_dataset.csv \
+  s3://docente-980921750553-us-east-1-an/synthetic_mortgage_dataset.csv
+```
+
+### 2. Abre un notebook de SageMaker
+
+En SageMaker abre el notebook en **JupyterLab**.
+
+Usaremos el notebook para:
+
+- leer el CSV desde S3;
+- entrenar la regresión logística;
+- generar `risk_metrics.json`;
+- generar `risk_model_params.json`;
+- subir ambos JSON a S3.
+
+### 3. Celda 0 — instala dependencias
+
+Ejecuta esta celda primero:
+
+```python
+%pip install --quiet scikit-learn pandas
+```
+
+No hace falta reiniciar el kernel.
 
 El CSV tendrá columnas como:
 
@@ -656,12 +663,54 @@ default_flag = 0 -> menor riesgo
 default_flag = 1 -> mayor riesgo
 ```
 
-### 3. Explora el dataset en notebook
+### 4. Celda 1 — imports y configuración S3
 
 ```python
-import pandas as pd
+import io
+import json
 
-df = pd.read_csv("synthetic_mortgage_dataset.csv")
+import boto3
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    confusion_matrix,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
+BUCKET = "docente-980921750553-us-east-1-an"
+CSV_KEY = "synthetic_mortgage_dataset.csv"
+METRICS_KEY = "ml/metrics/risk_metrics.json"
+MODEL_PARAMS_KEY = "ml/models/risk/risk_model_params.json"
+
+FEATURES = [
+    "debt_to_income_ratio",
+    "loan_to_value_ratio",
+    "payment_to_income_ratio",
+    "expense_to_income_ratio",
+    "total_obligations_to_income_ratio",
+    "employment_stability_score",
+    "banking_capacity_score",
+    "credit_history_score",
+]
+
+s3 = boto3.client("s3")
+print("Dataset:", f"s3://{BUCKET}/{CSV_KEY}")
+print("Metrics:", f"s3://{BUCKET}/{METRICS_KEY}")
+print("Params:", f"s3://{BUCKET}/{MODEL_PARAMS_KEY}")
+```
+
+### 5. Celda 2 — leer CSV desde S3
+
+```python
+response = s3.get_object(Bucket=BUCKET, Key=CSV_KEY)
+df = pd.read_csv(io.BytesIO(response["Body"].read()))
+
+print("Rows:", len(df))
 df.head()
 ```
 
@@ -709,27 +758,10 @@ Los casos con default_flag = 1 deberían tener más endeudamiento
 y peores scores en promedio.
 ```
 
-### 4. Entrena regresión logística en notebook
+### 6. Celda 3 — entrenar regresión logística
 
 ```python
-from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score, confusion_matrix, precision_score, recall_score
-
-features = [
-    "debt_to_income_ratio",
-    "loan_to_value_ratio",
-    "payment_to_income_ratio",
-    "expense_to_income_ratio",
-    "total_obligations_to_income_ratio",
-    "employment_stability_score",
-    "banking_capacity_score",
-    "credit_history_score",
-]
-
-X = df[features]
+X = df[FEATURES]
 y = df["default_flag"]
 
 X_train, X_test, y_train, y_test = train_test_split(
@@ -746,11 +778,12 @@ model = Pipeline([
 ])
 
 model.fit(X_train, y_train)
+print("Model trained.")
 ```
 
 Qué pasó aquí:
 
-- `features`: columnas de entrada;
+- `FEATURES`: columnas de entrada;
 - `X`: tabla con variables;
 - `y`: respuesta real;
 - `train_test_split`: separa datos de entrenamiento y prueba;
@@ -758,7 +791,7 @@ Qué pasó aquí:
 - `LogisticRegression`: modelo de clasificación;
 - `fit`: entrena el modelo.
 
-### 5. Evalúa el modelo
+### 7. Celda 4 — evaluar el modelo
 
 ```python
 probabilities = model.predict_proba(X_test)[:, 1]
@@ -791,7 +824,7 @@ Matriz de confusión:
  [falsos_bajo_riesgo, verdaderos_alto_riesgo]]
 ```
 
-### 6. Prueba dos casos extremos en notebook
+### 8. Celda 5 — probar dos casos extremos
 
 ```python
 low_risk = pd.DataFrame([{
@@ -822,36 +855,71 @@ print("High risk probability:", model.predict_proba(high_risk)[0][1])
 
 La probabilidad del segundo caso debería ser mayor.
 
-### 7. Entrena usando el script del curso
+### 9. Celda 6 — construir los JSON para NestJS
 
-El script del curso es:
+NestJS no abrirá un archivo `.joblib`. Para esta clase usará un JSON con:
 
-```txt
-train_risk_logistic.py
+- features usadas por el modelo;
+- medias del `StandardScaler`;
+- escalas del `StandardScaler`;
+- coeficientes;
+- intercepto;
+- threshold.
+
+Ese JSON es `risk_model_params.json`.
+
+```python
+def ks_statistic(y_true, y_score):
+    data = pd.DataFrame({"y": y_true, "score": y_score}).sort_values("score")
+    good = (data["y"] == 0).sum()
+    bad = (data["y"] == 1).sum()
+    data["cum_good"] = (data["y"] == 0).cumsum() / max(good, 1)
+    data["cum_bad"] = (data["y"] == 1).cumsum() / max(bad, 1)
+    return float((data["cum_bad"] - data["cum_good"]).abs().max())
+
+
+scaler = model.named_steps["scaler"]
+logistic = model.named_steps["logistic"]
+
+metrics = {
+    "model_type": "logistic_regression_classifier",
+    "target": "default_flag",
+    "features": FEATURES,
+    "auc": round(float(auc), 4),
+    "gini": round(float(2 * auc - 1), 4),
+    "ks": round(ks_statistic(y_test, probabilities), 4),
+    "precision": round(float(precision), 4),
+    "recall": round(float(recall), 4),
+    "confusion_matrix": matrix.tolist(),
+}
+
+model_params = {
+    "model_type": "logistic_regression_classifier",
+    "target": "default_flag",
+    "features": FEATURES,
+    "threshold": 0.5,
+    "scaler": {
+        "mean": {
+            name: float(value)
+            for name, value in zip(FEATURES, scaler.mean_)
+        },
+        "scale": {
+            name: float(value)
+            for name, value in zip(FEATURES, scaler.scale_)
+        },
+    },
+    "coefficients": {
+        name: float(value)
+        for name, value in zip(FEATURES, logistic.coef_[0])
+    },
+    "intercept": float(logistic.intercept_[0]),
+}
+
+print(json.dumps(metrics, indent=2))
+print(json.dumps(model_params, indent=2))
 ```
 
-Ejecuta:
-
-```bash
-python3 train_risk_logistic.py \
-  --train synthetic_mortgage_dataset.csv \
-  --model-dir model-risk \
-  --metrics risk_metrics.json \
-  --model-params risk_model_params.json
-```
-
-Este script:
-
-- lee el CSV;
-- separa entrenamiento y prueba;
-- escala variables;
-- entrena regresión logística;
-- calcula métricas;
-- guarda `model.joblib`;
-- guarda `risk_metrics.json`;
-- guarda `risk_model_params.json`.
-
-`risk_model_params.json` contiene una versión simple del modelo para que NestJS pueda calcular una predicción:
+`risk_model_params.json` tendrá esta forma:
 
 ```json
 {
@@ -877,177 +945,78 @@ Este script:
 }
 ```
 
-### 8. Sube el modelo local a S3
+### 10. Celda 7 — subir métricas y modelo a S3
 
-Este es el camino principal de la clase si SageMaker todavía no tiene quotas aprobadas.
+```python
+def upload_json(key, payload):
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=key,
+        Body=json.dumps(payload, indent=2).encode("utf-8"),
+        ContentType="application/json",
+    )
+    print(f"Uploaded s3://{BUCKET}/{key}")
 
-Aunque el modelo se entrenó localmente, NestJS puede usarlo porque lo que necesita para predecir está en:
 
-```txt
-risk_model_params.json
-```
-
-Sube métricas y parámetros a S3:
-
-```bash
-aws s3 cp synthetic_mortgage_dataset.csv s3://TU_BUCKET/ml/synthetic/synthetic_mortgage_dataset.csv
-aws s3 cp risk_metrics.json s3://TU_BUCKET/ml/metrics/risk_metrics.json
-aws s3 cp risk_model_params.json s3://TU_BUCKET/ml/models/risk/risk_model_params.json
+upload_json(METRICS_KEY, metrics)
+upload_json(MODEL_PARAMS_KEY, model_params)
 ```
 
 Con eso ya puedes usar:
 
 ```txt
-GET  /modulo1/clase06/sagemaker/models/risk/metrics
-POST /modulo1/clase06/models/risk/predict
+GET  /modulo1/clase06/models/risk/metrics
+POST /modulo1/clase06/applications/:applicationId/risk
 ```
-
-sin haber ejecutado todavía un SageMaker Training Job.
 
 La idea es:
 
 ```txt
-Entrenamiento local Docker -> JSON en S3 -> predicción en NestJS
+Notebook SageMaker -> JSON en S3 -> predicción en NestJS
 ```
 
-Más adelante, cuando AWS apruebe las quotas, el endpoint de training podrá generar esos mismos artefactos desde SageMaker:
+### 11. Celda 8 — verificar lectura desde S3
 
-```txt
-Entrenamiento SageMaker -> JSON en S3 -> predicción en NestJS
+```python
+for key in [METRICS_KEY, MODEL_PARAMS_KEY]:
+    obj = s3.get_object(Bucket=BUCKET, Key=key)
+    print(key)
+    print(obj["Body"].read().decode("utf-8")[:300], "...\n")
 ```
 
-### 9. Variables de entorno
+### 12. Variables de entorno
 
-Para la predicción con JSON en S3 necesitas:
-
-```env
-SAGEMAKER_BUCKET=TU_BUCKET
-SAGEMAKER_RISK_METRICS_KEY=ml/metrics/risk_metrics.json
-SAGEMAKER_RISK_MODEL_PARAMS_KEY=ml/models/risk/risk_model_params.json
-```
-
-Para el entrenamiento futuro en SageMaker también necesitarás instalar el SDK:
-
-```bash
-npm install @aws-sdk/client-sagemaker
-```
+NestJS ya no entrenará el modelo en esta práctica. Solo leerá los JSON generados por el notebook de SageMaker y guardados en S3.
 
 Agrega a `.env`:
 
 ```env
-SAGEMAKER_RISK_TRAINING_IMAGE=
-SAGEMAKER_ROLE_ARN=
 SAGEMAKER_BUCKET=TU_BUCKET
 SAGEMAKER_RISK_METRICS_KEY=ml/metrics/risk_metrics.json
 SAGEMAKER_RISK_MODEL_PARAMS_KEY=ml/models/risk/risk_model_params.json
 ```
 
-El endpoint de training de NestJS usa `CreateTrainingJob`. Para que SageMaker ejecute `train_risk_logistic.py`, la imagen indicada en `SAGEMAKER_RISK_TRAINING_IMAGE` debe contener o ejecutar ese script.
+Si usas el bucket docente:
 
-En esta clase hay dos niveles:
-
-| Nivel | Qué hacemos |
-|-------|-------------|
-| Notebook local Docker | Entrenamos y generamos `risk_model_params.json` |
-| S3 + NestJS | Subimos el JSON y predecimos desde la API |
-| NestJS + SageMaker | Opcional cuando AWS apruebe quotas |
-
-### 10. Crea `SageMakerTrainingService`
-
-Archivo: `src/modulo1/clase06/sagemaker-training.service.ts`
-
-```typescript
-import { Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import {
-  CreateTrainingJobCommand,
-  DescribeTrainingJobCommand,
-  SageMakerClient,
-} from '@aws-sdk/client-sagemaker';
-
-@Injectable()
-export class SageMakerTrainingService {
-  private readonly client: SageMakerClient;
-
-  constructor(private readonly config: ConfigService) {
-    this.client = new SageMakerClient({
-      region: this.config.getOrThrow<string>('AWS_REGION'),
-      credentials: {
-        accessKeyId: this.config.getOrThrow<string>('AWS_ACCESS_KEY_ID'),
-        secretAccessKey: this.config.getOrThrow<string>('AWS_SECRET_ACCESS_KEY'),
-      },
-    });
-  }
-
-  async startRiskTraining() {
-    const bucket = this.config.getOrThrow<string>('SAGEMAKER_BUCKET');
-    const jobName = `risk-logistic-${Date.now()}`;
-
-    await this.client.send(
-      new CreateTrainingJobCommand({
-        TrainingJobName: jobName,
-        RoleArn: this.config.getOrThrow<string>('SAGEMAKER_ROLE_ARN'),
-        AlgorithmSpecification: {
-          TrainingImage: this.config.getOrThrow<string>(
-            'SAGEMAKER_RISK_TRAINING_IMAGE',
-          ),
-          TrainingInputMode: 'File',
-        },
-        InputDataConfig: [
-          {
-            ChannelName: 'train',
-            DataSource: {
-              S3DataSource: {
-                S3DataType: 'S3Prefix',
-                S3Uri: `s3://${bucket}/ml/synthetic/`,
-                S3DataDistributionType: 'FullyReplicated',
-              },
-            },
-          },
-        ],
-        OutputDataConfig: {
-          S3OutputPath: `s3://${bucket}/ml/models/risk/`,
-        },
-        ResourceConfig: {
-          InstanceType: 'ml.m5.large',
-          InstanceCount: 1,
-          VolumeSizeInGB: 10,
-        },
-        StoppingCondition: {
-          MaxRuntimeInSeconds: 3600,
-        },
-      }),
-    );
-
-    return { jobName };
-  }
-
-  async describeTrainingJob(jobName: string) {
-    const response = await this.client.send(
-      new DescribeTrainingJobCommand({ TrainingJobName: jobName }),
-    );
-
-    return {
-      jobName,
-      status: response.TrainingJobStatus,
-      failureReason: response.FailureReason,
-      trainingStartTime: response.TrainingStartTime,
-      trainingEndTime: response.TrainingEndTime,
-      modelArtifacts: response.ModelArtifacts?.S3ModelArtifacts,
-    };
-  }
-}
+```env
+SAGEMAKER_BUCKET=docente-980921750553-us-east-1-an
+SAGEMAKER_RISK_METRICS_KEY=ml/metrics/risk_metrics.json
+SAGEMAKER_RISK_MODEL_PARAMS_KEY=ml/models/risk/risk_model_params.json
 ```
 
-### 11. Crea `Clase06Service`
+No necesitamos `SAGEMAKER_ROLE_ARN` ni `SAGEMAKER_RISK_TRAINING_IMAGE` para esta práctica porque NestJS no llamará `CreateTrainingJob`.
+
+### 13. Crea `Clase06Service`
 
 Archivo: `src/modulo1/clase06/clase06.service.ts`
 
 ```typescript
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import { SageMakerTrainingService } from './sagemaker-training.service';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { CreditFeatureSet } from '../../entities/credit-feature-set.entity';
 
 type RiskFeatures = {
   debt_to_income_ratio: number;
@@ -1077,7 +1046,8 @@ export class Clase06Service {
 
   constructor(
     private readonly config: ConfigService,
-    private readonly training: SageMakerTrainingService,
+    @InjectRepository(CreditFeatureSet)
+    private readonly featureSets: Repository<CreditFeatureSet>,
   ) {
     this.s3 = new S3Client({
       region: this.config.getOrThrow<string>('AWS_REGION'),
@@ -1088,18 +1058,35 @@ export class Clase06Service {
     });
   }
 
-  async startRiskTraining() {
-    return await this.training.startRiskTraining();
-  }
-
-  async getRiskTrainingStatus(jobName: string) {
-    return await this.training.describeTrainingJob(jobName);
-  }
-
   async getRiskMetrics() {
     return await this.readJson(
       this.config.getOrThrow<string>('SAGEMAKER_RISK_METRICS_KEY'),
     );
+  }
+
+  async predictApplicationRisk(applicationId: string) {
+    const featureSet = await this.featureSets.findOne({
+      where: { applicationId },
+    });
+
+    if (!featureSet) {
+      throw new NotFoundException('Feature set not found for this application');
+    }
+
+    const features: RiskFeatures = {
+      debt_to_income_ratio: Number(featureSet.debtToIncomeRatio),
+      loan_to_value_ratio: Number(featureSet.loanToValueRatio),
+      payment_to_income_ratio: Number(featureSet.paymentToIncomeRatio),
+      expense_to_income_ratio: Number(featureSet.expenseToIncomeRatio),
+      total_obligations_to_income_ratio: Number(
+        featureSet.totalObligationsToIncomeRatio,
+      ),
+      employment_stability_score: Number(featureSet.employmentStabilityScore),
+      banking_capacity_score: Number(featureSet.bankingCapacityScore),
+      credit_history_score: Number(featureSet.creditHistoryScore),
+    };
+
+    return await this.predictRisk(features);
   }
 
   async predictRisk(features: RiskFeatures) {
@@ -1113,8 +1100,9 @@ export class Clase06Service {
       const rawValue = features[featureName];
       const mean = model.scaler.mean[featureName];
       const scale = model.scaler.scale[featureName] || 1;
+      const coefficient = model.coefficients[featureName];
       const standardizedValue = (rawValue - mean) / scale;
-      score += standardizedValue * model.coefficients[featureName];
+      score += standardizedValue * coefficient;
     }
 
     const defaultProbability = 1 / (1 + Math.exp(-score));
@@ -1142,7 +1130,17 @@ export class Clase06Service {
 }
 ```
 
-### 12. Crea el controller
+Qué hace este servicio:
+
+- lee `risk_metrics.json` desde S3;
+- lee `risk_model_params.json` desde S3;
+- busca las features del applicant en `credit_feature_sets`;
+- aplica la fórmula de regresión logística en NestJS;
+- devuelve probabilidad y etiqueta de riesgo.
+
+No llama a SageMaker para predecir.
+
+### 14. Crea el controller
 
 Archivo: `src/modulo1/clase06/clase06.controller.ts`
 
@@ -1156,19 +1154,14 @@ import { Clase06Service } from './clase06.service';
 export class Clase06Controller {
   constructor(private readonly clase06: Clase06Service) {}
 
-  @Post('sagemaker/train-risk')
-  async trainRisk() {
-    return await this.clase06.startRiskTraining();
-  }
-
-  @Get('sagemaker/train-risk/:jobName')
-  async getTrainingStatus(@Param('jobName') jobName: string) {
-    return await this.clase06.getRiskTrainingStatus(jobName);
-  }
-
-  @Get('sagemaker/models/risk/metrics')
+  @Get('models/risk/metrics')
   async getRiskMetrics() {
     return await this.clase06.getRiskMetrics();
+  }
+
+  @Post('applications/:applicationId/risk')
+  async predictApplicationRisk(@Param('applicationId') applicationId: string) {
+    return await this.clase06.predictApplicationRisk(applicationId);
   }
 
   @Post('models/risk/predict')
@@ -1190,14 +1183,21 @@ export class Clase06Controller {
 }
 ```
 
-### 13. Actualiza `Modulo1Module`
+Endpoints de la clase:
+
+| Endpoint | Uso |
+|----------|-----|
+| `GET /modulo1/clase06/models/risk/metrics` | Ver métricas del modelo entrenado en notebook |
+| `POST /modulo1/clase06/applications/:applicationId/risk` | Evaluar riesgo de una solicitud usando features de Clase 5 |
+| `POST /modulo1/clase06/models/risk/predict` | Probar manualmente con un JSON de features |
+
+### 15. Actualiza `Modulo1Module`
 
 Agrega:
 
 ```typescript
 import { Clase06Controller } from './clase06/clase06.controller';
 import { Clase06Service } from './clase06/clase06.service';
-import { SageMakerTrainingService } from './clase06/sagemaker-training.service';
 ```
 
 Luego registra:
@@ -1219,43 +1219,31 @@ providers: [
   Clase05Service,
   Clase06Service,
   GlueService,
-  SageMakerTrainingService,
   TextractService,
 ],
 ```
 
-### 14. Prueba desde NestJS
+Asegúrate de que `CreditFeatureSet` esté en `TypeOrmModule.forFeature([...])`, porque `Clase06Service` lo necesita para leer las variables ya generadas en Clase 5.
 
-Primero prueba métricas y predicción usando los JSON generados localmente y subidos a S3.
+### 16. Prueba desde NestJS
 
-Consultar métricas:
+Primero consulta métricas:
 
 ```bash
-curl http://localhost:3000/modulo1/clase06/sagemaker/models/risk/metrics \
+curl http://localhost:3000/modulo1/clase06/models/risk/metrics \
   -H "x-api-key: test1" \
   -H "x-api-secret: pass1"
 ```
 
-Probar predicción de menor riesgo:
+Luego prueba el riesgo de un applicant real que ya tenga features en `credit_feature_sets`:
 
 ```bash
-curl -X POST http://localhost:3000/modulo1/clase06/models/risk/predict \
-  -H "Content-Type: application/json" \
+curl -X POST http://localhost:3000/modulo1/clase06/applications/APPLICATION_ID/risk \
   -H "x-api-key: test1" \
-  -H "x-api-secret: pass1" \
-  -d '{
-    "debt_to_income_ratio": 0.18,
-    "loan_to_value_ratio": 0.60,
-    "payment_to_income_ratio": 0.20,
-    "expense_to_income_ratio": 0.35,
-    "total_obligations_to_income_ratio": 0.73,
-    "employment_stability_score": 100,
-    "banking_capacity_score": 90,
-    "credit_history_score": 95
-  }'
+  -H "x-api-secret: pass1"
 ```
 
-Probar predicción de mayor riesgo:
+También puedes probar manualmente sin depender de la base de datos:
 
 ```bash
 curl -X POST http://localhost:3000/modulo1/clase06/models/risk/predict \
@@ -1274,23 +1262,15 @@ curl -X POST http://localhost:3000/modulo1/clase06/models/risk/predict \
   }'
 ```
 
-La segunda respuesta debería tener mayor `defaultProbability`.
+### Entrenamiento desde NestJS más adelante
 
-Cuando AWS ya tenga quotas aprobadas, recién prueba el entrenamiento en SageMaker:
+Más adelante sí podríamos agregar:
 
-```bash
-curl -X POST http://localhost:3000/modulo1/clase06/sagemaker/train-risk \
-  -H "x-api-key: test1" \
-  -H "x-api-secret: pass1"
+```txt
+POST /modulo1/clase06/sagemaker/train-risk
 ```
 
-Consultar estado:
-
-```bash
-curl http://localhost:3000/modulo1/clase06/sagemaker/train-risk/JOB_NAME \
-  -H "x-api-key: test1" \
-  -H "x-api-secret: pass1"
-```
+Ese endpoint llamaría `CreateTrainingJob` y generaría los mismos JSON en S3. Por ahora no lo implementamos en la práctica porque depende de quotas de SageMaker y de una imagen de entrenamiento en ECR.
 
 ## Entrega
 

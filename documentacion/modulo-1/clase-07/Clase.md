@@ -1,59 +1,56 @@
-# Clase 7: SageMaker y modelo de monto recomendado con XGBoost
+# Clase 7: Modelo de monto recomendado con XGBoost
 
 | | |
 |---|---|
 | **Clase** | 7 de 11 |
 | **Duración** | 3 horas |
 | **Controlador** | `Clase07Controller` |
-| **Endpoints** | `POST /modulo1/clase07/sagemaker/train-amount`, `GET /modulo1/clase07/sagemaker/train-amount/:jobName`, `GET /modulo1/clase07/sagemaker/models/amount/metrics`, `GET /modulo1/clase07/sagemaker/models/compare` |
+| **Endpoints** | `GET /modulo1/clase07/models/amount/metrics`, `POST /modulo1/clase07/applications/:applicationId/amount`, `POST /modulo1/clase07/models/amount/predict`, `GET /modulo1/clase07/models/compare` |
 
 ## Objetivos
 
 Al terminar esta sesión podrás:
 
 - Diferenciar clasificación y regresión con el mismo caso hipotecario.
-- Entrenar un modelo de **regresión** para monto recomendado.
-- Usar XGBoost con datos tabulares de crédito.
-- Probar el entrenamiento desde notebook y desde NestJS.
-- Comparar métricas del modelo de riesgo y del modelo de monto.
+- Entender qué problema resuelve el modelo de monto recomendado.
+- Explicar de forma simple qué es XGBoost y cómo usa árboles.
+- Entrenar un modelo XGBoost en un notebook de SageMaker.
+- Generar `amount_metrics.json` y `amount_model.json`.
+- Subir esos JSON a S3.
+- Usar NestJS para recomendar monto a partir de las features de Clase 5.
+- Comparar el modelo de riesgo de Clase 6 con el modelo de monto de Clase 7.
 
 ---
 
 ## Parte teórica
 
-### Qué responde este modelo
+### 1. Qué responde este modelo
 
-Clase 6:
+En Clase 6 respondimos:
 
 ```txt
 ¿Cuál es el riesgo de incumplimiento?
 ```
 
-Clase 7:
+Eso era clasificación:
 
 ```txt
-¿Qué monto recomendado tiene sentido para este file?
+LOW / HIGH
 ```
 
-Por eso este modelo es de **regresión**: devuelve un número.
+En Clase 7 respondemos:
 
-### XGBoost
-
-XGBoost construye muchos árboles pequeños. Cada árbol intenta corregir errores de los anteriores. Es fuerte para datos tabulares y relaciones no lineales.
-
-Entrada:
-
-```json
-{
-  "net_monthly_income": 8500,
-  "monthly_debt_payment": 1800,
-  "property_value": 600000,
-  "requested_amount": 450000,
-  "credit_history_score": 90
-}
+```txt
+¿Qué monto recomendado tiene sentido para esta solicitud?
 ```
 
-Salida:
+Eso es regresión:
+
+```txt
+Salida = número
+```
+
+Ejemplo:
 
 ```json
 {
@@ -61,56 +58,278 @@ Salida:
 }
 ```
 
-### Métricas de regresión
+El modelo no aprueba el crédito. Devuelve una recomendación numérica que luego podría combinarse con políticas de negocio.
+
+### 2. Clasificación vs regresión
+
+| Pregunta | Tipo de modelo | Salida |
+|----------|----------------|--------|
+| ¿Es riesgoso? | Clasificación | clase o probabilidad |
+| ¿Cuánto recomendar? | Regresión | número |
+
+En palabras simples:
+
+```txt
+Clasificación elige una categoría.
+Regresión estima un valor.
+```
+
+### 3. Qué es XGBoost
+
+XGBoost es un algoritmo basado en árboles de decisión.
+
+Un árbol de decisión funciona con preguntas simples:
+
+```txt
+¿El ingreso mensual es mayor a 8000?
+¿La relación deuda/ingreso es mayor a 0.45?
+¿El historial crediticio es menor a 60?
+```
+
+Cada pregunta divide los casos hasta llegar a una predicción.
+
+Ejemplo muy simple:
+
+```txt
+Si ingreso alto y deuda baja -> recomendar monto mayor
+Si ingreso bajo o deuda alta -> recomendar monto menor
+```
+
+XGBoost no usa un solo árbol. Usa muchos árboles pequeños.
+
+```txt
+árbol 1 -> primera estimación
+árbol 2 -> corrige errores del árbol 1
+árbol 3 -> corrige errores acumulados
+...
+resultado final -> suma de muchos árboles
+```
+
+Eso se llama **boosting**.
+
+```mermaid
+flowchart LR
+  A["Features crediticias"] --> B["Árbol 1"]
+  B --> C["Árbol 2 corrige"]
+  C --> D["Árbol 3 corrige"]
+  D --> E["Monto recomendado"]
+```
+
+### 4. Por qué XGBoost sirve para crédito
+
+XGBoost funciona bien con datos tabulares y relaciones no lineales.
+
+El monto recomendado puede depender de varias cosas al mismo tiempo:
+
+- ingreso mensual;
+- deuda mensual;
+- gastos mensuales;
+- valor del inmueble;
+- monto solicitado;
+- plazo;
+- historial crediticio;
+- capacidad bancaria;
+- ratios creados en Clase 5.
+
+No siempre hay una relación lineal simple. Por ejemplo:
+
+```txt
+Un ingreso alto ayuda,
+pero si la deuda también es alta,
+el monto recomendado puede bajar.
+```
+
+XGBoost puede aprender ese tipo de combinaciones.
+
+### 5. Variables que usará el modelo
+
+El modelo de monto usará variables limpias y features de Clase 5.
+
+| Variable | Qué significa |
+|----------|---------------|
+| `net_monthly_income` | ingreso neto mensual |
+| `monthly_debt_payment` | pago mensual de deudas existentes |
+| `monthly_expenses` | gastos mensuales declarados |
+| `property_value` | valor del inmueble |
+| `requested_amount` | monto solicitado |
+| `requested_term_months` | plazo solicitado |
+| `estimated_monthly_payment` | cuota estimada del nuevo crédito |
+| `debt_to_income_ratio` | deuda mensual / ingreso |
+| `loan_to_value_ratio` | monto solicitado / valor inmueble |
+| `payment_to_income_ratio` | cuota estimada / ingreso |
+| `expense_to_income_ratio` | gastos / ingreso |
+| `total_obligations_to_income_ratio` | deuda + gastos + nueva cuota / ingreso |
+| `employment_stability_score` | score de estabilidad laboral |
+| `banking_capacity_score` | score de capacidad bancaria |
+| `credit_history_score` | score de historial crediticio |
+
+La variable que queremos predecir es:
+
+```txt
+recommended_amount
+```
+
+### 6. Métricas de regresión
+
+En Clase 6 usamos métricas de clasificación como AUC, precision y recall.
+
+En Clase 7 usamos métricas de regresión.
 
 | Métrica | Qué indica |
 |---------|------------|
-| RMSE | Error promedio penalizando errores grandes |
-| MAE | Error absoluto promedio |
-| R2 | Qué tanto explica el modelo la variación del monto |
+| `RMSE` | error promedio, penalizando más los errores grandes |
+| `MAE` | error absoluto promedio |
+| `R2` | qué tanto explica el modelo la variación del monto |
 
-No usamos AUC ni KS aquí porque esas son métricas de clasificación.
+Ejemplo simple:
+
+```txt
+MAE = 18000
+```
+
+Significa:
+
+```txt
+En promedio, el modelo se equivoca por 18000 Bs.
+```
+
+No usamos AUC aquí porque AUC es para clasificación.
+
+### 7. Qué JSON genera XGBoost
+
+Igual que en Clase 6, guardaremos artefactos en S3.
+
+Pero hay una diferencia:
+
+```txt
+Regresión logística -> JSON pequeño con coeficientes.
+XGBoost -> JSON con muchos árboles.
+```
+
+El notebook generará:
+
+```txt
+amount_metrics.json
+amount_model.json
+```
+
+`amount_metrics.json` sirve para revisar qué tan bien entrenó el modelo.
+
+`amount_model.json` contiene los árboles de XGBoost en un formato que NestJS puede recorrer para calcular una predicción.
 
 ---
 
 ## Parte práctica
 
-### 1. Notebook en SageMaker Studio
+El flujo será igual al de Clase 6:
 
-Usa el mismo dataset sintético generado en Clase 6:
-
-```python
-import pandas as pd
-
-df = pd.read_csv("s3://TU_BUCKET/ml/synthetic/synthetic_mortgage_dataset.csv")
+```txt
+Notebook SageMaker -> entrena modelo -> genera JSON -> S3 -> NestJS predice
 ```
 
-Entrena XGBoost:
+### 1. Prepara el dataset en S3
+
+Usamos el mismo dataset sintético de Clase 6.
+
+```bash
+python3 generate_synthetic_mortgage_dataset.py \
+  --rows 2000 \
+  --output synthetic_mortgage_dataset.csv
+
+aws s3 cp synthetic_mortgage_dataset.csv \
+  s3://docente-980921750553-us-east-1-an/synthetic_mortgage_dataset.csv
+```
+
+### 2. Abre un notebook de SageMaker
+
+Abre el notebook en **JupyterLab**.
+
+El notebook hará esto:
+
+- leer el CSV desde S3;
+- entrenar XGBoost;
+- evaluar métricas;
+- generar `amount_metrics.json`;
+- generar `amount_model.json`;
+- subir ambos JSON a S3.
+
+### 3. Celda 0 — instalar dependencias
 
 ```python
-from sklearn.model_selection import train_test_split
+%pip install --quiet xgboost scikit-learn pandas
+```
+
+### 4. Celda 1 — imports y configuración S3
+
+```python
+import io
+import json
+
+import boto3
+import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split
 from xgboost import XGBRegressor
 
-features = [
+BUCKET = "docente-980921750553-us-east-1-an"
+CSV_KEY = "synthetic_mortgage_dataset.csv"
+AMOUNT_METRICS_KEY = "ml/metrics/amount_metrics.json"
+AMOUNT_MODEL_KEY = "ml/models/amount/amount_model.json"
+RISK_METRICS_KEY = "ml/metrics/risk_metrics.json"
+
+FEATURES = [
     "net_monthly_income",
     "monthly_debt_payment",
+    "monthly_expenses",
     "property_value",
     "requested_amount",
     "requested_term_months",
+    "estimated_monthly_payment",
     "debt_to_income_ratio",
     "loan_to_value_ratio",
     "payment_to_income_ratio",
+    "expense_to_income_ratio",
+    "total_obligations_to_income_ratio",
     "employment_stability_score",
     "banking_capacity_score",
     "credit_history_score",
 ]
 
-X = df[features]
+s3 = boto3.client("s3")
+print("Dataset:", f"s3://{BUCKET}/{CSV_KEY}")
+```
+
+### 5. Celda 2 — leer dataset
+
+```python
+response = s3.get_object(Bucket=BUCKET, Key=CSV_KEY)
+df = pd.read_csv(io.BytesIO(response["Body"].read()))
+
+print("Rows:", len(df))
+df[FEATURES + ["recommended_amount"]].head()
+```
+
+### 6. Celda 3 — explorar target
+
+```python
+df["recommended_amount"].describe()
+```
+
+```python
+df[FEATURES + ["recommended_amount"]].corr(numeric_only=True)["recommended_amount"].sort_values(ascending=False)
+```
+
+### 7. Celda 4 — entrenar XGBoost
+
+```python
+X = df[FEATURES]
 y = df["recommended_amount"]
 
 X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42
+    X,
+    y,
+    test_size=0.2,
+    random_state=42,
 )
 
 model = XGBRegressor(
@@ -119,195 +338,216 @@ model = XGBRegressor(
     max_depth=4,
     learning_rate=0.08,
     subsample=0.85,
+    colsample_bytree=0.9,
     random_state=42,
 )
 
 model.fit(X_train, y_train)
+print("Model trained.")
+```
+
+### 8. Celda 5 — evaluar métricas
+
+```python
 predictions = model.predict(X_test)
 
-print("RMSE:", mean_squared_error(y_test, predictions, squared=False))
-print("MAE:", mean_absolute_error(y_test, predictions))
-print("R2:", r2_score(y_test, predictions))
+rmse = mean_squared_error(y_test, predictions, squared=False)
+mae = mean_absolute_error(y_test, predictions)
+r2 = r2_score(y_test, predictions)
+
+print("RMSE:", round(float(rmse), 2))
+print("MAE:", round(float(mae), 2))
+print("R2:", round(float(r2), 4))
 ```
 
-### 2. Entrenamiento como script
+### 9. Celda 6 — probar dos casos
 
-Usa el archivo de raíz:
+```python
+low_amount_case = pd.DataFrame([{
+    "net_monthly_income": 4500,
+    "monthly_debt_payment": 1800,
+    "monthly_expenses": 2500,
+    "property_value": 350000,
+    "requested_amount": 300000,
+    "requested_term_months": 180,
+    "estimated_monthly_payment": 1666.67,
+    "debt_to_income_ratio": 0.40,
+    "loan_to_value_ratio": 0.86,
+    "payment_to_income_ratio": 0.37,
+    "expense_to_income_ratio": 0.56,
+    "total_obligations_to_income_ratio": 1.33,
+    "employment_stability_score": 35,
+    "banking_capacity_score": 30,
+    "credit_history_score": 45,
+}])
 
-```txt
-train_amount_xgboost.py
+high_amount_case = pd.DataFrame([{
+    "net_monthly_income": 15000,
+    "monthly_debt_payment": 1200,
+    "monthly_expenses": 4500,
+    "property_value": 900000,
+    "requested_amount": 500000,
+    "requested_term_months": 240,
+    "estimated_monthly_payment": 2083.33,
+    "debt_to_income_ratio": 0.08,
+    "loan_to_value_ratio": 0.56,
+    "payment_to_income_ratio": 0.14,
+    "expense_to_income_ratio": 0.30,
+    "total_obligations_to_income_ratio": 0.52,
+    "employment_stability_score": 100,
+    "banking_capacity_score": 90,
+    "credit_history_score": 95,
+}])
+
+print("Low amount case:", round(float(model.predict(low_amount_case)[0]), 2))
+print("High amount case:", round(float(model.predict(high_amount_case)[0]), 2))
 ```
 
-En local:
+### 10. Celda 7 — crear JSON de métricas y modelo
 
-```bash
-python train_amount_xgboost.py \
-  --train synthetic_mortgage_dataset.csv \
-  --model-dir model-amount \
-  --metrics amount_metrics.json
+```python
+def parse_base_score(model):
+    config = json.loads(model.get_booster().save_config())
+    raw_base_score = config["learner"]["learner_model_param"]["base_score"]
+    return float(str(raw_base_score).strip("[]"))
+
+
+booster = model.get_booster()
+
+amount_metrics = {
+    "model_type": "xgboost_regressor",
+    "target": "recommended_amount",
+    "features": FEATURES,
+    "rmse": round(float(rmse), 2),
+    "mae": round(float(mae), 2),
+    "r2": round(float(r2), 4),
+}
+
+amount_model = {
+    "model_type": "xgboost_regressor_tree_dump",
+    "target": "recommended_amount",
+    "features": FEATURES,
+    "base_score": parse_base_score(model),
+    "trees": [
+        json.loads(tree)
+        for tree in booster.get_dump(dump_format="json")
+    ],
+    "prediction_clip": {
+        "min": 0,
+    },
+}
+
+print(json.dumps(amount_metrics, indent=2))
+print("Trees:", len(amount_model["trees"]))
 ```
 
-Sube las métricas al bucket para que la API pueda leerlas:
+### 11. Celda 8 — subir JSON a S3
 
-```bash
-aws s3 cp amount_metrics.json s3://TU_BUCKET/ml/metrics/amount_metrics.json
+```python
+def upload_json(key, payload):
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=key,
+        Body=json.dumps(payload, indent=2).encode("utf-8"),
+        ContentType="application/json",
+    )
+    print(f"Uploaded s3://{BUCKET}/{key}")
+
+
+upload_json(AMOUNT_METRICS_KEY, amount_metrics)
+upload_json(AMOUNT_MODEL_KEY, amount_model)
 ```
 
-### 3. Variables de entorno
+### 12. Variables de entorno
+
+Agrega a `.env`:
 
 ```env
-SAGEMAKER_AMOUNT_TRAINING_IMAGE=
 SAGEMAKER_AMOUNT_METRICS_KEY=ml/metrics/amount_metrics.json
+SAGEMAKER_AMOUNT_MODEL_KEY=ml/models/amount/amount_model.json
 ```
 
-Esta clase reutiliza `SAGEMAKER_BUCKET` y `SAGEMAKER_ROLE_ARN` configurados en la Clase 6.
+Se reutiliza:
 
-Igual que en la clase anterior, `SAGEMAKER_AMOUNT_TRAINING_IMAGE` debe apuntar a una imagen capaz de ejecutar `train_amount_xgboost.py` si vas a lanzar el entrenamiento desde el endpoint de NestJS.
-
-### 4. Extiende `SageMakerTrainingService`
-
-Archivo: `src/modulo1/clase06/sagemaker-training.service.ts`
-
-```typescript
-  async startAmountTraining() {
-    const bucket = this.config.getOrThrow<string>('SAGEMAKER_BUCKET');
-    const jobName = `amount-xgboost-${Date.now()}`;
-
-    await this.client.send(
-      new CreateTrainingJobCommand({
-        TrainingJobName: jobName,
-        RoleArn: this.config.getOrThrow<string>('SAGEMAKER_ROLE_ARN'),
-        AlgorithmSpecification: {
-          TrainingImage: this.config.getOrThrow<string>('SAGEMAKER_AMOUNT_TRAINING_IMAGE'),
-          TrainingInputMode: 'File',
-        },
-        InputDataConfig: [
-          {
-            ChannelName: 'train',
-            DataSource: {
-              S3DataSource: {
-                S3DataType: 'S3Prefix',
-                S3Uri: `s3://${bucket}/ml/synthetic/`,
-                S3DataDistributionType: 'FullyReplicated',
-              },
-            },
-          },
-        ],
-        OutputDataConfig: {
-          S3OutputPath: `s3://${bucket}/ml/models/amount/`,
-        },
-        ResourceConfig: {
-          InstanceType: 'ml.m5.large',
-          InstanceCount: 1,
-          VolumeSizeInGB: 10,
-        },
-        StoppingCondition: {
-          MaxRuntimeInSeconds: 3600,
-        },
-      }),
-    );
-
-    return { jobName };
-  }
+```env
+SAGEMAKER_BUCKET=docente-980921750553-us-east-1-an
+SAGEMAKER_RISK_METRICS_KEY=ml/metrics/risk_metrics.json
 ```
 
-### 5. Crea `Clase07Service`
+### 13. Endpoints NestJS
 
-Archivo: `src/modulo1/clase07/clase07.service.ts`
+Clase 7 tendrá estos endpoints:
 
-```typescript
-import { Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import { SageMakerTrainingService } from '../clase06/sagemaker-training.service';
+| Endpoint | Uso |
+|----------|-----|
+| `GET /modulo1/clase07/models/amount/metrics` | Ver métricas del modelo de monto |
+| `POST /modulo1/clase07/applications/:applicationId/amount` | Recomendar monto para una solicitud real |
+| `POST /modulo1/clase07/models/amount/predict` | Probar monto con features manuales |
+| `GET /modulo1/clase07/models/compare` | Comparar métricas riesgo vs monto |
 
-@Injectable()
-export class Clase07Service {
-  private readonly s3: S3Client;
+### 14. Probar desde NestJS
 
-  constructor(
-    private readonly config: ConfigService,
-    private readonly training: SageMakerTrainingService,
-  ) {
-    this.s3 = new S3Client({
-      region: this.config.getOrThrow<string>('AWS_REGION'),
-    });
-  }
+Métricas:
 
-  async startAmountTraining() {
-    return await this.training.startAmountTraining();
-  }
-
-  async getAmountTrainingStatus(jobName: string) {
-    return await this.training.describeTrainingJob(jobName);
-  }
-
-  async getAmountMetrics() {
-    return await this.readJson(this.config.getOrThrow<string>('SAGEMAKER_AMOUNT_METRICS_KEY'));
-  }
-
-  async compareModels() {
-    return {
-      riskModel: await this.readJson(this.config.getOrThrow<string>('SAGEMAKER_RISK_METRICS_KEY')),
-      amountModel: await this.getAmountMetrics(),
-    };
-  }
-
-  private async readJson(key: string) {
-    const response = await this.s3.send(
-      new GetObjectCommand({
-        Bucket: this.config.getOrThrow<string>('SAGEMAKER_BUCKET'),
-        Key: key,
-      }),
-    );
-
-    return JSON.parse(await response.Body!.transformToString());
-  }
-}
+```bash
+curl http://localhost:3000/modulo1/clase07/models/amount/metrics \
+  -H "x-api-key: test1" \
+  -H "x-api-secret: pass1"
 ```
 
-### 6. Crea el controller
+Recomendar monto para una solicitud real:
 
-Archivo: `src/modulo1/clase07/clase07.controller.ts`
-
-```typescript
-import { Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
-import { ApiKeyGuard } from '../../auth/guards/api-key.guard';
-import { Clase07Service } from './clase07.service';
-
-@Controller('modulo1/clase07')
-@UseGuards(ApiKeyGuard)
-export class Clase07Controller {
-  constructor(private readonly clase07: Clase07Service) {}
-
-  @Post('sagemaker/train-amount')
-  async trainAmount() {
-    return await this.clase07.startAmountTraining();
-  }
-
-  @Get('sagemaker/train-amount/:jobName')
-  async getTrainingStatus(@Param('jobName') jobName: string) {
-    return await this.clase07.getAmountTrainingStatus(jobName);
-  }
-
-  @Get('sagemaker/models/amount/metrics')
-  async getAmountMetrics() {
-    return await this.clase07.getAmountMetrics();
-  }
-
-  @Get('sagemaker/models/compare')
-  async compareModels() {
-    return await this.clase07.compareModels();
-  }
-}
+```bash
+curl -X POST http://localhost:3000/modulo1/clase07/applications/APPLICATION_ID/amount \
+  -H "x-api-key: test1" \
+  -H "x-api-secret: pass1"
 ```
 
-### 7. Actualiza `Modulo1Module`
+Probar manualmente:
 
-Agrega `Clase07Controller` y `Clase07Service`. Mantén `SageMakerTrainingService`.
+```bash
+curl -X POST http://localhost:3000/modulo1/clase07/models/amount/predict \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: test1" \
+  -H "x-api-secret: pass1" \
+  -d '{
+    "net_monthly_income": 15000,
+    "monthly_debt_payment": 1200,
+    "monthly_expenses": 4500,
+    "property_value": 900000,
+    "requested_amount": 500000,
+    "requested_term_months": 240,
+    "estimated_monthly_payment": 2083.33,
+    "debt_to_income_ratio": 0.08,
+    "loan_to_value_ratio": 0.56,
+    "payment_to_income_ratio": 0.14,
+    "expense_to_income_ratio": 0.30,
+    "total_obligations_to_income_ratio": 0.52,
+    "employment_stability_score": 100,
+    "banking_capacity_score": 90,
+    "credit_history_score": 95
+  }'
+```
+
+Comparar modelos:
+
+```bash
+curl http://localhost:3000/modulo1/clase07/models/compare \
+  -H "x-api-key: test1" \
+  -H "x-api-secret: pass1"
+```
+
+## Entrega
+
+- Captura del notebook entrenando XGBoost.
+- Evidencia de `amount_metrics.json` en S3.
+- Evidencia de `amount_model.json` en S3.
+- Resultado de `GET /models/amount/metrics`.
+- Resultado de `POST /applications/:applicationId/amount`.
+- Comparación breve entre modelo de riesgo y modelo de monto.
 
 ## Recursos
 
-- [XGBoost en SageMaker](https://docs.aws.amazon.com/sagemaker/latest/dg/xgboost.html)
-- [XGBRegressor](https://xgboost.readthedocs.io/)
+- [XGBoost Python Package](https://xgboost.readthedocs.io/)
+- [XGBRegressor](https://xgboost.readthedocs.io/en/stable/python/python_api.html)
 - [Regression metrics](https://scikit-learn.org/stable/modules/model_evaluation.html#regression-metrics)
