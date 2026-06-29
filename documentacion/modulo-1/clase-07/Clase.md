@@ -224,28 +224,17 @@ amount_model.json
 El flujo será igual al de Clase 6:
 
 ```txt
-Notebook SageMaker -> entrena modelo -> genera JSON -> S3 -> NestJS predice
+Notebook SageMaker -> genera CSV -> sube CSV a S3 -> entrena modelo -> genera JSON -> S3 -> NestJS predice
 ```
 
-### 1. Prepara el dataset en S3
-
-Usamos el mismo dataset sintético de Clase 6.
-
-```bash
-python3 generate_synthetic_mortgage_dataset.py \
-  --rows 2000 \
-  --output synthetic_mortgage_dataset.csv
-
-aws s3 cp synthetic_mortgage_dataset.csv \
-  s3://docente-980921750553-us-east-1-an/synthetic_mortgage_dataset.csv
-```
-
-### 2. Abre un notebook de SageMaker
+### 1. Abre un notebook de SageMaker
 
 Abre el notebook en **JupyterLab**.
 
 El notebook hará esto:
 
+- generar el CSV sintético dentro de SageMaker;
+- subir el CSV a S3;
 - leer el CSV desde S3;
 - entrenar XGBoost;
 - evaluar métricas;
@@ -253,19 +242,20 @@ El notebook hará esto:
 - generar `amount_model.json`;
 - subir ambos JSON a S3.
 
-### 3. Celda 0 — instalar dependencias
+### 2. Celda 0 — instalar dependencias
 
 ```python
 %pip install --quiet xgboost scikit-learn pandas
 ```
 
-### 4. Celda 1 — imports y configuración S3
+### 3. Celda 1 — imports y configuración S3
 
 ```python
 import io
 import json
 
 import boto3
+import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
@@ -299,7 +289,167 @@ s3 = boto3.client("s3")
 print("Dataset:", f"s3://{BUCKET}/{CSV_KEY}")
 ```
 
-### 5. Celda 2 — leer dataset
+### 4. Celda 2 — generar el CSV sintético en SageMaker y subirlo a S3
+
+En esta celda creamos el mismo dataset sintético que usamos desde la Clase 6, pero ahora directamente dentro del notebook de SageMaker.
+
+```python
+def clip(values, low, high):
+    return np.minimum(np.maximum(values, low), high)
+
+
+def generate_synthetic_mortgage_dataset(rows=2000, seed=42):
+    rng = np.random.default_rng(seed)
+
+    net_monthly_income = clip(rng.normal(8500, 3200, rows), 2500, 30000)
+    property_value = clip(
+        net_monthly_income * rng.normal(70, 18, rows),
+        120000,
+        1800000,
+    )
+    requested_amount = property_value * clip(
+        rng.normal(0.72, 0.13, rows),
+        0.35,
+        0.98,
+    )
+    requested_term_months = rng.choice(
+        [120, 180, 240, 300],
+        rows,
+        p=[0.15, 0.25, 0.45, 0.15],
+    )
+    monthly_debt_payment = net_monthly_income * clip(
+        rng.normal(0.22, 0.14, rows),
+        0,
+        0.75,
+    )
+    monthly_expenses = net_monthly_income * clip(
+        rng.normal(0.42, 0.16, rows),
+        0.12,
+        0.85,
+    )
+    active_loan_count = rng.poisson(1.2, rows)
+    has_late_payments = rng.binomial(
+        1,
+        clip(0.08 + active_loan_count * 0.04, 0.05, 0.45),
+    )
+    employment_tenure_months = clip(rng.gamma(3.0, 18.0, rows), 1, 240)
+    average_monthly_balance = net_monthly_income * clip(
+        rng.normal(1.15, 0.9, rows),
+        0.02,
+        5.5,
+    )
+
+    estimated_monthly_payment = requested_amount / requested_term_months
+    debt_to_income_ratio = monthly_debt_payment / net_monthly_income
+    loan_to_value_ratio = requested_amount / property_value
+    payment_to_income_ratio = estimated_monthly_payment / net_monthly_income
+    expense_to_income_ratio = monthly_expenses / net_monthly_income
+    total_obligations_to_income_ratio = (
+        monthly_debt_payment + monthly_expenses + estimated_monthly_payment
+    ) / net_monthly_income
+
+    employment_stability_score = np.select(
+        [
+            employment_tenure_months >= 60,
+            employment_tenure_months >= 24,
+            employment_tenure_months >= 12,
+        ],
+        [100, 80, 60],
+        default=35,
+    )
+    banking_capacity_score = np.select(
+        [
+            average_monthly_balance / net_monthly_income >= 3,
+            average_monthly_balance / net_monthly_income >= 1,
+            average_monthly_balance / net_monthly_income >= 0.3,
+        ],
+        [100, 75, 55],
+        default=30,
+    )
+    credit_history_score = clip(
+        100 - has_late_payments * 35 - active_loan_count * 8,
+        0,
+        100,
+    )
+
+    risk_signal = (
+        2.4 * debt_to_income_ratio
+        + 2.0 * payment_to_income_ratio
+        + 1.8 * total_obligations_to_income_ratio
+        + 0.8 * expense_to_income_ratio
+        + 1.7 * (loan_to_value_ratio > 0.85)
+        + 1.2 * has_late_payments
+        + 0.5 * (active_loan_count >= 3)
+        - 0.012 * employment_stability_score
+        - 0.007 * banking_capacity_score
+        - 0.009 * credit_history_score
+        + rng.normal(0, 0.25, rows)
+    )
+    default_probability = 1 / (1 + np.exp(-(risk_signal - 0.9)))
+    default_flag = rng.binomial(1, clip(default_probability, 0.02, 0.85))
+
+    affordability_amount = (
+        net_monthly_income * 0.35 - monthly_debt_payment
+    ) * requested_term_months
+    collateral_amount = property_value * 0.8
+    history_factor = clip(credit_history_score / 100, 0.35, 1.0)
+    recommended_amount = clip(
+        np.minimum.reduce([requested_amount, affordability_amount, collateral_amount])
+        * history_factor,
+        0,
+        requested_amount,
+    )
+    recommended_amount = np.round(recommended_amount / 1000) * 1000
+
+    return pd.DataFrame(
+        {
+            "application_id": [f"APP-{i:06d}" for i in range(rows)],
+            "net_monthly_income": np.round(net_monthly_income, 2),
+            "monthly_debt_payment": np.round(monthly_debt_payment, 2),
+            "monthly_expenses": np.round(monthly_expenses, 2),
+            "property_value": np.round(property_value, 2),
+            "requested_amount": np.round(requested_amount, 2),
+            "requested_term_months": requested_term_months,
+            "active_loan_count": active_loan_count,
+            "has_late_payments": has_late_payments,
+            "employment_tenure_months": np.round(employment_tenure_months).astype(int),
+            "average_monthly_balance": np.round(average_monthly_balance, 2),
+            "estimated_monthly_payment": np.round(estimated_monthly_payment, 2),
+            "debt_to_income_ratio": np.round(debt_to_income_ratio, 4),
+            "loan_to_value_ratio": np.round(loan_to_value_ratio, 4),
+            "payment_to_income_ratio": np.round(payment_to_income_ratio, 4),
+            "expense_to_income_ratio": np.round(expense_to_income_ratio, 4),
+            "total_obligations_to_income_ratio": np.round(
+                total_obligations_to_income_ratio,
+                4,
+            ),
+            "employment_stability_score": employment_stability_score,
+            "banking_capacity_score": banking_capacity_score,
+            "credit_history_score": credit_history_score,
+            "default_flag": default_flag,
+            "recommended_amount": recommended_amount,
+        }
+    )
+
+
+df = generate_synthetic_mortgage_dataset(rows=2000)
+
+csv_buffer = io.StringIO()
+df.to_csv(csv_buffer, index=False)
+
+s3.put_object(
+    Bucket=BUCKET,
+    Key=CSV_KEY,
+    Body=csv_buffer.getvalue().encode("utf-8"),
+    ContentType="text/csv",
+)
+
+print("Rows generated:", len(df))
+print("Uploaded:", f"s3://{BUCKET}/{CSV_KEY}")
+df.head()
+```
+
+### 5. Celda 3 — leer dataset desde S3
 
 ```python
 response = s3.get_object(Bucket=BUCKET, Key=CSV_KEY)
@@ -309,7 +459,7 @@ print("Rows:", len(df))
 df[FEATURES + ["recommended_amount"]].head()
 ```
 
-### 6. Celda 3 — explorar target
+### 6. Celda 4 — explorar target
 
 ```python
 df["recommended_amount"].describe()
@@ -319,7 +469,7 @@ df["recommended_amount"].describe()
 df[FEATURES + ["recommended_amount"]].corr(numeric_only=True)["recommended_amount"].sort_values(ascending=False)
 ```
 
-### 7. Celda 4 — entrenar XGBoost
+### 7. Celda 5 — entrenar XGBoost
 
 ```python
 X = df[FEATURES]
@@ -346,7 +496,7 @@ model.fit(X_train, y_train)
 print("Model trained.")
 ```
 
-### 8. Celda 5 — evaluar métricas
+### 8. Celda 6 — evaluar métricas
 
 ```python
 predictions = model.predict(X_test)
@@ -360,7 +510,7 @@ print("MAE:", round(float(mae), 2))
 print("R2:", round(float(r2), 4))
 ```
 
-### 9. Celda 6 — probar dos casos
+### 9. Celda 7 — probar dos casos
 
 ```python
 low_amount_case = pd.DataFrame([{
@@ -403,7 +553,7 @@ print("Low amount case:", round(float(model.predict(low_amount_case)[0]), 2))
 print("High amount case:", round(float(model.predict(high_amount_case)[0]), 2))
 ```
 
-### 10. Celda 7 — crear JSON de métricas y modelo
+### 10. Celda 8 — crear JSON de métricas y modelo
 
 ```python
 def parse_base_score(model):
@@ -441,7 +591,7 @@ print(json.dumps(amount_metrics, indent=2))
 print("Trees:", len(amount_model["trees"]))
 ```
 
-### 11. Celda 8 — subir JSON a S3
+### 11. Celda 9 — subir JSON a S3
 
 ```python
 def upload_json(key, payload):
