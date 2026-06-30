@@ -1,6 +1,6 @@
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CreditFeatureSet } from '../../entities/credit-feature-set.entity';
@@ -38,6 +38,10 @@ export class Clase06Service {
   ) {
     this.s3 = new S3Client({
       region: this.config.getOrThrow<string>('AWS_REGION'),
+      credentials: {
+        accessKeyId: this.config.getOrThrow<string>('AWS_ACCESS_KEY_ID'),
+        secretAccessKey: this.config.getOrThrow<string>('AWS_SECRET_ACCESS_KEY'),
+      },
     });
   }
 
@@ -57,18 +61,16 @@ export class Clase06Service {
     }
 
     const features: RiskFeatures = {
-      debt_to_income_ratio: this.toNumber(featureSet.debtToIncomeRatio),
-      loan_to_value_ratio: this.toNumber(featureSet.loanToValueRatio),
-      payment_to_income_ratio: this.toNumber(featureSet.paymentToIncomeRatio),
-      expense_to_income_ratio: this.toNumber(featureSet.expenseToIncomeRatio),
-      total_obligations_to_income_ratio: this.toNumber(
+      debt_to_income_ratio: Number(featureSet.debtToIncomeRatio),
+      loan_to_value_ratio: Number(featureSet.loanToValueRatio),
+      payment_to_income_ratio: Number(featureSet.paymentToIncomeRatio),
+      expense_to_income_ratio: Number(featureSet.expenseToIncomeRatio),
+      total_obligations_to_income_ratio: Number(
         featureSet.totalObligationsToIncomeRatio,
       ),
-      employment_stability_score: this.toNumber(
-        featureSet.employmentStabilityScore,
-      ),
-      banking_capacity_score: this.toNumber(featureSet.bankingCapacityScore),
-      credit_history_score: this.toNumber(featureSet.creditHistoryScore),
+      employment_stability_score: Number(featureSet.employmentStabilityScore),
+      banking_capacity_score: Number(featureSet.bankingCapacityScore),
+      credit_history_score: Number(featureSet.creditHistoryScore),
     };
 
     return await this.predictRisk(features);
@@ -111,13 +113,5 @@ export class Clase06Service {
     );
 
     return JSON.parse(await response.Body!.transformToString());
-  }
-
-  private toNumber(value?: number) {
-    const numberValue = Number(value);
-    if (!Number.isFinite(numberValue)) {
-      throw new NotFoundException('Application has incomplete risk features');
-    }
-    return numberValue;
   }
 }

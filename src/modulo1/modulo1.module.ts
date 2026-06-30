@@ -27,8 +27,7 @@ import { Clase05Controller } from './clase05/clase05.controller';
 import { Clase05Service } from './clase05/clase05.service';
 import { Clase06Controller } from './clase06/clase06.controller';
 import { Clase06Service } from './clase06/clase06.service';
-import { Clase07Controller } from './clase07/clase07.controller';
-import { Clase07Service } from './clase07/clase07.service';
+
 
 @Module({
   imports: [
@@ -53,7 +52,6 @@ import { Clase07Service } from './clase07/clase07.service';
     Clase04Controller,
     Clase05Controller,
     Clase06Controller,
-    Clase07Controller,
   ],
   providers: [
     Clase01Service,
@@ -62,7 +60,6 @@ import { Clase07Service } from './clase07/clase07.service';
     Clase04Service,
     Clase05Service,
     Clase06Service,
-    Clase07Service,
     TextractService,
     GlueService,
   ],
