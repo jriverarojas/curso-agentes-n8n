@@ -347,7 +347,321 @@ Notebook entrena -> JSON en S3 -> NestJS lee JSON -> predice
 
 Clase 8 no entrena modelos. Solo integra los modelos de Clase 6 y 7.
 
-### 1. Endpoint final de evaluación
+### 1. Qué vamos a construir
+
+En esta práctica agregaremos una nueva capa de integración.
+
+No vamos a volver a escribir la lógica completa de riesgo ni de monto. Ya existe:
+
+```txt
+Clase06Service -> sabe predecir riesgo
+Clase07Service -> sabe recomendar monto
+```
+
+Clase 8 hará esto:
+
+```txt
+Clase08Controller -> recibe requests HTTP
+Clase08Service -> llama Clase06Service y Clase07Service
+Clase08Service -> combina resultados y devuelve una decisión final
+```
+
+Archivos que crearemos o modificaremos:
+
+| Archivo | Qué haremos |
+|---------|-------------|
+| `src/modulo1/clase08/clase08.controller.ts` | Crear endpoints de clase 8 |
+| `src/modulo1/clase08/clase08.service.ts` | Integrar riesgo + monto |
+| `src/modulo1/modulo1.module.ts` | Registrar controller y service |
+| `.env` | Verificar keys de modelos JSON en S3 |
+
+### 2. Verificar variables de entorno
+
+Clase 8 depende de los JSON creados en las clases anteriores.
+
+En `.env` deben existir estas variables:
+
+```env
+SAGEMAKER_RISK_MODEL_PARAMS_KEY=ml/models/risk/risk_model_params.json
+SAGEMAKER_AMOUNT_MODEL_KEY=ml/models/amount/amount_model.json
+```
+
+También pueden existir estas keys para consultar métricas:
+
+```env
+SAGEMAKER_RISK_METRICS_KEY=ml/metrics/risk_metrics.json
+SAGEMAKER_AMOUNT_METRICS_KEY=ml/metrics/amount_metrics.json
+```
+
+Y para la explicación del paraguas que subiremos al final:
+
+```env
+EXPLAIN_UMBRELLA_KEY=ml/explanations/umbrella_explanation.json
+```
+
+Si los archivos no existen en S3, los endpoints fallarán con un error parecido a:
+
+```txt
+NoSuchKey
+```
+
+Eso significa:
+
+```txt
+NestJS está buscando el JSON en S3, pero el archivo todavía no fue subido
+o la ruta configurada no coincide.
+```
+
+### 3. Crear el controller de Clase 8
+
+Crea el archivo:
+
+```txt
+src/modulo1/clase08/clase08.controller.ts
+```
+
+Código:
+
+```ts
+import { Body, Controller, Param, Post, UseGuards } from '@nestjs/common';
+import { ApiKeyGuard } from '../../auth/guards/api-key.guard';
+import { Clase08Service } from './clase08.service';
+
+@Controller('modulo1/clase08')
+@UseGuards(ApiKeyGuard)
+export class Clase08Controller {
+  constructor(private readonly clase08: Clase08Service) {}
+
+  @Post('credit-files/:applicationId/evaluate')
+  async evaluateCreditFile(@Param('applicationId') applicationId: string) {
+    return await this.clase08.evaluateCreditFile(applicationId);
+  }
+
+  @Post('models/risk')
+  async predictRisk(@Body() body: { features: Record<string, number> }) {
+    return await this.clase08.predictRisk(body.features);
+  }
+
+  @Post('models/amount')
+  async predictAmount(@Body() body: { features: Record<string, number> }) {
+    return await this.clase08.predictAmount(body.features);
+  }
+}
+```
+
+Qué hace cada endpoint:
+
+| Endpoint | Qué hace |
+|----------|----------|
+| `POST /credit-files/:applicationId/evaluate` | Busca features por `applicationId`, calcula riesgo, calcula monto y devuelve una decisión |
+| `POST /models/risk` | Permite probar el modelo de riesgo enviando features manualmente |
+| `POST /models/amount` | Permite probar el modelo de monto enviando features manualmente |
+
+### 4. Crear el service de Clase 8
+
+Crea el archivo:
+
+```txt
+src/modulo1/clase08/clase08.service.ts
+```
+
+Código:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { Clase06Service } from '../clase06/clase06.service';
+import { Clase07Service } from '../clase07/clase07.service';
+
+type RiskPrediction = {
+  defaultProbability: number;
+  riskLabel: 'HIGH' | 'LOW';
+  threshold: number;
+  modelType: string;
+  features: Record<string, number>;
+};
+
+type AmountPrediction = {
+  recommendedAmount: number;
+  modelType: string;
+  features: Record<string, number>;
+};
+
+@Injectable()
+export class Clase08Service {
+  constructor(
+    private readonly clase06: Clase06Service,
+    private readonly clase07: Clase07Service,
+  ) {}
+
+  async evaluateCreditFile(applicationId: string) {
+    const risk = (await this.clase06.predictApplicationRisk(
+      applicationId,
+    )) as RiskPrediction;
+
+    const amount = (await this.clase07.recommendApplicationAmount(
+      applicationId,
+    )) as AmountPrediction;
+
+    const requestedAmount = Number(amount.features.requested_amount ?? 0);
+
+    const decision = this.makeDecision(
+      risk.defaultProbability,
+      requestedAmount,
+      amount.recommendedAmount,
+    );
+
+    return {
+      applicationId,
+      risk: {
+        defaultProbability: risk.defaultProbability,
+        threshold: risk.threshold,
+        riskLabel: risk.riskLabel,
+        modelType: risk.modelType,
+      },
+      amount: {
+        requestedAmount,
+        recommendedAmount: amount.recommendedAmount,
+        modelType: amount.modelType,
+      },
+      decision,
+      reasons: this.buildReasons(
+        risk.defaultProbability,
+        risk.riskLabel,
+        requestedAmount,
+        amount.recommendedAmount,
+      ),
+    };
+  }
+
+  async predictRisk(features: Record<string, number>) {
+    return await this.clase06.predictRisk({
+      debt_to_income_ratio: Number(features.debt_to_income_ratio),
+      loan_to_value_ratio: Number(features.loan_to_value_ratio),
+      payment_to_income_ratio: Number(features.payment_to_income_ratio),
+      expense_to_income_ratio: Number(features.expense_to_income_ratio),
+      total_obligations_to_income_ratio: Number(
+        features.total_obligations_to_income_ratio,
+      ),
+      employment_stability_score: Number(features.employment_stability_score),
+      banking_capacity_score: Number(features.banking_capacity_score),
+      credit_history_score: Number(features.credit_history_score),
+    });
+  }
+
+  async predictAmount(features: Record<string, number>) {
+    return await this.clase07.predictAmount(features);
+  }
+
+  private makeDecision(
+    defaultProbability: number,
+    requestedAmount: number,
+    recommendedAmount: number,
+  ) {
+    if (defaultProbability >= 0.6) {
+      return 'REJECT_OR_MANUAL_REVIEW';
+    }
+
+    if (requestedAmount > recommendedAmount * 1.1) {
+      return 'REVIEW_AMOUNT';
+    }
+
+    return 'PRE_APPROVE_FOR_REVIEW';
+  }
+
+  private buildReasons(
+    defaultProbability: number,
+    riskLabel: string,
+    requestedAmount: number,
+    recommendedAmount: number,
+  ) {
+    const reasons: string[] = [];
+
+    if (riskLabel === 'HIGH') {
+      reasons.push('El modelo de riesgo clasifico la solicitud como HIGH.');
+    }
+
+    if (defaultProbability >= 0.6) {
+      reasons.push('La probabilidad de incumplimiento supera el 60%.');
+    }
+
+    if (requestedAmount > recommendedAmount * 1.1) {
+      reasons.push('El monto solicitado supera en mas de 10% al monto recomendado.');
+    }
+
+    if (reasons.length === 0) {
+      reasons.push('Riesgo y monto recomendado se mantienen dentro de rangos de revision.');
+    }
+
+    return reasons;
+  }
+}
+```
+
+La idea más importante está aquí:
+
+```ts
+const risk = await this.clase06.predictApplicationRisk(applicationId);
+const amount = await this.clase07.recommendApplicationAmount(applicationId);
+```
+
+Clase 8 no calcula todo desde cero. Reutiliza las clases anteriores.
+
+Luego toma ambas respuestas y aplica una regla:
+
+```ts
+if (defaultProbability >= 0.6) {
+  return 'REJECT_OR_MANUAL_REVIEW';
+}
+
+if (requestedAmount > recommendedAmount * 1.1) {
+  return 'REVIEW_AMOUNT';
+}
+
+return 'PRE_APPROVE_FOR_REVIEW';
+```
+
+Esta regla es didáctica:
+
+| Regla | Decisión |
+|-------|----------|
+| Probabilidad de incumplimiento mayor o igual a 60% | `REJECT_OR_MANUAL_REVIEW` |
+| Monto solicitado mayor al recomendado por más de 10% | `REVIEW_AMOUNT` |
+| Caso dentro de rangos razonables | `PRE_APPROVE_FOR_REVIEW` |
+
+### 5. Registrar Clase 8 en el módulo
+
+Abre:
+
+```txt
+src/modulo1/modulo1.module.ts
+```
+
+Agrega los imports:
+
+```ts
+import { Clase08Controller } from './clase08/clase08.controller';
+import { Clase08Service } from './clase08/clase08.service';
+```
+
+Agrega el controller:
+
+```ts
+controllers: [
+  Clase08Controller,
+]
+```
+
+Agrega el service:
+
+```ts
+providers: [
+  Clase08Service,
+]
+```
+
+En el archivo real habrá más controllers y providers de clases anteriores. No los borres. Solo agrega los de Clase 8.
+
+### 6. Endpoint final de evaluación
 
 ```txt
 POST /modulo1/clase08/credit-files/:applicationId/evaluate
@@ -369,7 +683,39 @@ curl -X POST http://localhost:3000/modulo1/clase08/credit-files/APPLICATION_ID/e
   -H "x-api-secret: pass1"
 ```
 
-### 2. Probar solo riesgo desde Clase 8
+Resultado esperado:
+
+```json
+{
+  "applicationId": "APPLICATION_ID",
+  "risk": {
+    "defaultProbability": 0.27,
+    "threshold": 0.5,
+    "riskLabel": "LOW",
+    "modelType": "logistic_regression_classifier"
+  },
+  "amount": {
+    "requestedAmount": 500000,
+    "recommendedAmount": 430000,
+    "modelType": "xgboost_regressor"
+  },
+  "decision": "REVIEW_AMOUNT",
+  "reasons": [
+    "El monto solicitado supera en mas de 10% al monto recomendado."
+  ]
+}
+```
+
+Los números pueden cambiar según tus features y tus modelos JSON. Lo importante es que la respuesta tenga:
+
+```txt
+risk
+amount
+decision
+reasons
+```
+
+### 7. Probar solo riesgo desde Clase 8
 
 ```txt
 POST /modulo1/clase08/models/risk
@@ -396,7 +742,25 @@ curl -X POST http://localhost:3000/modulo1/clase08/models/risk \
   }'
 ```
 
-### 3. Probar solo monto desde Clase 8
+Resultado esperado:
+
+```json
+{
+  "defaultProbability": 0.83,
+  "threshold": 0.5,
+  "riskLabel": "HIGH",
+  "modelType": "logistic_regression_classifier",
+  "features": {
+    "debt_to_income_ratio": 0.62,
+    "loan_to_value_ratio": 0.95,
+    "payment_to_income_ratio": 0.55
+  }
+}
+```
+
+Los valores exactos pueden cambiar. En este ejemplo esperamos riesgo alto porque enviamos ratios altos y scores bajos.
+
+### 8. Probar solo monto desde Clase 8
 
 ```txt
 POST /modulo1/clase08/models/amount
@@ -428,6 +792,43 @@ curl -X POST http://localhost:3000/modulo1/clase08/models/amount \
       "credit_history_score": 95
     }
   }'
+```
+
+Resultado esperado:
+
+```json
+{
+  "recommendedAmount": 420000,
+  "modelType": "xgboost_regressor",
+  "features": {
+    "net_monthly_income": 15000,
+    "requested_amount": 500000,
+    "property_value": 900000
+  }
+}
+```
+
+El monto exacto puede cambiar según el modelo entrenado. Lo importante es que NestJS ya no entrena: solo lee el JSON de S3 y calcula la predicción.
+
+### 9. Resultado final esperado de la parte NestJS
+
+Al terminar esta parte deberías tener:
+
+```txt
+1. Clase08Controller creado.
+2. Clase08Service creado.
+3. Clase08Controller registrado en Modulo1Module.
+4. Clase08Service registrado en Modulo1Module.
+5. Endpoint integrado funcionando.
+6. Endpoint de riesgo funcionando desde Clase 8.
+7. Endpoint de monto funcionando desde Clase 8.
+```
+
+Y deberías poder explicar esta frase:
+
+```txt
+Clase 8 no crea modelos nuevos.
+Clase 8 combina modelos ya entrenados para producir una evaluación final.
 ```
 
 ---
@@ -803,6 +1204,92 @@ print(f"Uploaded s3://{BUCKET}/{EXPLAIN_UMBRELLA_KEY}")
 ```
 
 Este JSON será usado en Clase 9 para consultar explicaciones desde NestJS.
+
+### 8. Resultado esperado de la parte SageMaker
+
+Al terminar el notebook deberías tener:
+
+```txt
+1. Dataset sintético de paraguas creado.
+2. Modelo de regresión logística entrenado.
+3. Predicción para un caso nuevo.
+4. Gráfico waterfall de SHAP.
+5. JSON de explicación creado.
+6. Explicación final en español impresa.
+7. Archivo umbrella_explanation.json subido a S3.
+```
+
+El JSON generado debería verse parecido a esto:
+
+```json
+{
+  "model": "umbrella_logistic_regression",
+  "prediction": {
+    "take_umbrella_probability": 0.852
+  },
+  "base_value": 0.31,
+  "feature_contributions": [
+    {
+      "feature": "rain_probability",
+      "value": 0.85,
+      "contribution": 0.312
+    },
+    {
+      "feature": "humidity",
+      "value": 0.78,
+      "contribution": 0.071
+    },
+    {
+      "feature": "cloudiness",
+      "value": 0.9,
+      "contribution": 0.052
+    }
+  ],
+  "natural_language_explanation": {
+    "prediction_label": "llevar paraguas",
+    "summary": "El modelo predice \"llevar paraguas\" con probabilidad 85.20%.",
+    "main_reasons": [
+      {
+        "feature": "rain_probability",
+        "feature_name_es": "probabilidad de lluvia",
+        "value": 0.85,
+        "level": "alta",
+        "contribution": 0.312
+      }
+    ]
+  }
+}
+```
+
+Los valores exactos pueden variar, pero deberías revisar tres cosas:
+
+```txt
+1. Que rain_probability aparezca entre las variables más importantes.
+2. Que base_value exista.
+3. Que natural_language_explanation exista.
+```
+
+## Resultado final esperado de la clase
+
+Al terminar Clase 8 debes poder mostrar:
+
+| Parte | Resultado esperado |
+|-------|--------------------|
+| NestJS | Endpoint integrado `evaluate` funcionando |
+| NestJS | Endpoint manual de riesgo funcionando |
+| NestJS | Endpoint manual de monto funcionando |
+| SageMaker | Modelo del paraguas entrenado |
+| SageMaker | Waterfall plot de SHAP generado |
+| SageMaker | JSON `umbrella_explanation.json` subido a S3 |
+| Conceptual | Diferencia clara entre predicción, decisión y explicación |
+
+La frase de cierre de la clase es:
+
+```txt
+Un modelo predice.
+Una regla de negocio decide.
+La explicabilidad ayuda a entender por qué el modelo predijo eso.
+```
 
 ## Entrega
 
