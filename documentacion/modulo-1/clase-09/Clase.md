@@ -161,30 +161,59 @@ Usaremos el mismo dataset sintético y el mismo modelo de riesgo de Clase 6.
 ### 1. Instalar dependencias
 
 ```python
+# Instalamos SHAP para calcular explicaciones del modelo.
+# Instalamos scikit-learn para entrenar la regresión logística.
+# Instalamos pandas y numpy para trabajar con datos tabulares y cálculos.
+# Instalamos boto3 para leer y escribir archivos en S3.
 %pip install --quiet shap scikit-learn pandas numpy boto3
 ```
 
 ### 2. Leer dataset desde S3
 
 ```python
+# io nos permite convertir los bytes descargados desde S3 en un archivo en memoria.
 import io
+
+# json nos permite convertir diccionarios de Python a texto JSON.
 import json
 
+# boto3 nos permite conectarnos a AWS, en este caso a S3.
 import boto3
+
+# numpy nos ayuda con cálculos numéricos, promedios y valores absolutos.
 import numpy as np
+
+# pandas nos permite manejar datos en tablas llamadas DataFrames.
 import pandas as pd
+
+# shap nos permite explicar cuánto aporta cada variable a una predicción.
 import shap
 
+# LogisticRegression será el modelo de clasificación de riesgo.
 from sklearn.linear_model import LogisticRegression
+
+# train_test_split separa datos de entrenamiento y prueba.
 from sklearn.model_selection import train_test_split
+
+# Pipeline une pasos de preparación y modelo en un solo objeto.
 from sklearn.pipeline import Pipeline
+
+# StandardScaler normaliza las variables para que estén en escalas comparables.
 from sklearn.preprocessing import StandardScaler
 
+# Bucket donde está el dataset sintético y donde guardaremos explicaciones.
 BUCKET = "docente-980921750553-us-east-1-an"
+
+# Ruta del CSV dentro del bucket S3.
 CSV_KEY = "synthetic_mortgage_dataset.csv"
+
+# Ruta donde guardaremos la explicación global del modelo de riesgo.
 RISK_EXPLANATION_KEY = "ml/explanations/risk_global_explanation.json"
+
+# Prefijo que usaremos luego para guardar explicaciones por solicitud.
 APPLICATION_EXPLANATIONS_PREFIX = "ml/explanations/applications"
 
+# Lista de variables que el modelo usa para predecir riesgo.
 RISK_FEATURES = [
     "debt_to_income_ratio",
     "loan_to_value_ratio",
@@ -196,111 +225,279 @@ RISK_FEATURES = [
     "credit_history_score",
 ]
 
+# Creamos un cliente de S3 para leer y escribir archivos.
 s3 = boto3.client("s3")
+
+# Descargamos el CSV desde S3.
 response = s3.get_object(Bucket=BUCKET, Key=CSV_KEY)
+
+# Leemos el contenido descargado como un DataFrame de pandas.
 df = pd.read_csv(io.BytesIO(response["Body"].read()))
+
+# Mostramos las primeras filas para confirmar que el dataset cargó bien.
 df.head()
 ```
 
 ### 3. Entrenar modelo de riesgo para explicación
 
 ```python
+# X contiene las variables de entrada que verá el modelo.
 X = df[RISK_FEATURES]
+
+# y contiene la etiqueta real: 1 si hubo default, 0 si no hubo default.
 y = df["default_flag"]
 
+# Separamos el dataset en entrenamiento y prueba.
 X_train, X_test, y_train, y_test = train_test_split(
+    # Variables de entrada.
     X,
+
+    # Variable objetivo.
     y,
+
+    # Usamos 20% para prueba y 80% para entrenamiento.
     test_size=0.2,
+
+    # Fijamos la aleatoriedad para repetir el mismo resultado.
     random_state=42,
+
+    # Mantenemos proporción parecida de defaults en train y test.
     stratify=y,
 )
 
+# Creamos un pipeline con normalización y regresión logística.
 risk_model = Pipeline([
+    # Primero normalizamos las variables numéricas.
     ("scaler", StandardScaler()),
+
+    # Luego entrenamos una regresión logística.
+    # class_weight="balanced" ayuda si hay más casos LOW que HIGH.
     ("logistic", LogisticRegression(class_weight="balanced", max_iter=1000)),
 ])
 
+# Entrenamos el modelo con los datos de entrenamiento.
 risk_model.fit(X_train, y_train)
 ```
 
 ### 4. Calcular SHAP global
 
 ```python
+# Tomamos 100 filas de entrenamiento como referencia histórica para SHAP.
+# Este background sirve para calcular el valor base del modelo.
 background = X_train.sample(100, random_state=42)
+
+# Tomamos 200 casos de prueba para calcular importancia global.
+# No usamos todo el test para que el notebook corra rápido.
 sample = X_test.sample(200, random_state=42)
 
+# Creamos el explicador de SHAP.
+# Le pasamos predict_proba porque queremos explicar probabilidades.
+# Le pasamos background para que SHAP tenga una referencia histórica.
 explainer = shap.Explainer(risk_model.predict_proba, background)
+
+# Calculamos los valores SHAP para los 200 casos de muestra.
 shap_values = explainer(sample)
 
+# Extraemos los aportes SHAP de la clase 1.
+# Clase 1 significa default o riesgo alto.
 risk_class_values = shap_values[:, :, 1].values
+
+# Calculamos la importancia global promedio.
+# abs toma el tamaño del aporte sin importar si sube o baja el riesgo.
+# mean(axis=0) promedia por variable.
 global_importance = np.abs(risk_class_values).mean(axis=0)
 
+# Construimos el JSON de explicación global.
 risk_global = {
+    # Nombre del modelo explicado.
     "model": "risk_logistic_regression",
+
+    # Tipo de explicación: global significa comportamiento general del modelo.
     "explanation_type": "global",
+
+    # Objetivo explicado: probabilidad de default.
     "target": "default_probability",
+
+    # Lista ordenada de variables más importantes.
     "top_features": [
         {
+            # Nombre de la variable.
             "feature": feature,
+
+            # Importancia promedio de esa variable.
             "importance": round(float(importance), 6),
         }
+
+        # Recorremos las variables ordenadas por importancia descendente.
         for feature, importance in sorted(
+            # Unimos cada nombre de variable con su importancia.
             zip(RISK_FEATURES, global_importance),
+
+            # Ordenamos usando la importancia.
             key=lambda item: item[1],
+
+            # reverse=True significa de mayor a menor.
             reverse=True,
         )
     ],
 }
 
+# Imprimimos el JSON para revisarlo antes de subirlo a S3.
 print(json.dumps(risk_global, indent=2))
 ```
 
 ### 5. Guardar explicación global en S3
 
 ```python
+# Subimos la explicación global al bucket S3.
 s3.put_object(
+    # Bucket destino.
     Bucket=BUCKET,
+
+    # Ruta del archivo dentro del bucket.
     Key=RISK_EXPLANATION_KEY,
+
+    # Convertimos el diccionario risk_global a JSON y luego a bytes.
     Body=json.dumps(risk_global, indent=2).encode("utf-8"),
+
+    # Indicamos que el archivo es JSON.
     ContentType="application/json",
 )
 
+# Mostramos la ruta final del archivo subido.
 print(f"Uploaded s3://{BUCKET}/{RISK_EXPLANATION_KEY}")
 ```
 
 ### 6. Explicar un caso local
 
 ```python
+# Tomamos un caso del conjunto de prueba.
+# Usamos doble corchete [[0]] para mantenerlo como DataFrame y no como Series.
 case = X_test.iloc[[0]]
+
+# Buscamos el application_id del caso para poder asociar la explicación a una solicitud.
 case_application_id = df.loc[case.index[0], "application_id"]
+
+# Aquí se calcula la probabilidad de incumplimiento del caso.
+# predict_proba devuelve dos columnas:
+# columna 0 -> probabilidad de clase 0, no default
+# columna 1 -> probabilidad de clase 1, default
+# Por eso usamos [0][1]: primer caso, clase default.
 case_probability = risk_model.predict_proba(case)[0][1]
+
+# Aquí calculamos los valores SHAP para el caso local.
+# El [:, :, 1] significa que queremos explicar la clase 1: default.
 case_shap = explainer(case)[:, :, 1]
 
+# SHAP también nos da un valor base.
+# Este es el punto de partida antes de sumar los aportes de las variables.
+case_base_value = float(case_shap.base_values[0])
+
+# Sumamos los aportes de todas las variables.
+case_contributions_sum = float(case_shap.values[0].sum())
+
+# Verificamos la idea central de SHAP:
+# valor base + suma de aportes = predicción explicada.
+# En este caso, como estamos explicando predict_proba, el resultado queda en escala de probabilidad.
+case_reconstructed_probability = case_base_value + case_contributions_sum
+
+# Construimos el JSON de explicación local para este applicant.
 risk_local = {
+    # Guardamos el application_id para saber a qué solicitud corresponde.
     "application_id": str(case_application_id),
+
+    # Guardamos la predicción de riesgo del modelo.
     "risk": {
+        # Probabilidad de default calculada por el modelo.
         "default_probability": round(float(case_probability), 4),
+
+        # Etiqueta simple basada en threshold 0.5.
         "risk_label": "HIGH" if case_probability >= 0.5 else "LOW",
     },
+
+    # Resumen numérico para verificar base + aportes.
+    "shap_summary": {
+        # Punto de partida de SHAP antes de mirar este caso.
+        "base_value": round(case_base_value, 6),
+
+        # Suma de todos los aportes de las variables.
+        "contributions_sum": round(case_contributions_sum, 6),
+
+        # Resultado de base_value + contributions_sum.
+        "reconstructed_probability": round(case_reconstructed_probability, 6),
+
+        # Probabilidad directa del modelo para comparar.
+        "model_probability": round(float(case_probability), 6),
+    },
+
+    # Lista con la explicación por variable.
     "risk_explanation": [
         {
+            # Nombre de la variable.
             "feature": feature,
+
+            # Valor de esa variable en este caso.
             "value": float(case.iloc[0][feature]),
+
+            # Aporte SHAP de esa variable.
+            # Positivo sube el riesgo; negativo baja el riesgo.
             "contribution": round(float(contribution), 6),
         }
+
+        # Recorremos cada variable junto con su aporte SHAP.
         for feature, contribution in zip(RISK_FEATURES, case_shap.values[0])
     ],
 }
 
+# Ordenamos la explicación local desde la variable más influyente.
+# abs permite ordenar por impacto total, sea positivo o negativo.
 risk_local["risk_explanation"] = sorted(
+    # Lista original de explicaciones por variable.
     risk_local["risk_explanation"],
+
+    # Usamos el valor absoluto del aporte como criterio de orden.
     key=lambda item: abs(item["contribution"]),
+
+    # Orden descendente: primero la variable con más impacto.
     reverse=True,
 )
 
+# Imprimimos el JSON local para revisar la explicación del caso.
 print(json.dumps(risk_local, indent=2))
 ```
+
+La parte más importante de esta celda es:
+
+```python
+case_probability = risk_model.predict_proba(case)[0][1]
+```
+
+Eso saca la probabilidad de default directamente del modelo.
+
+Luego SHAP nos permite revisar cómo se forma esa predicción:
+
+```python
+case_base_value = float(case_shap.base_values[0])
+case_contributions_sum = float(case_shap.values[0].sum())
+case_reconstructed_probability = case_base_value + case_contributions_sum
+```
+
+Conceptualmente:
+
+```txt
+probabilidad base + aportes de variables = probabilidad explicada
+```
+
+Ejemplo:
+
+```txt
+base_value:                  0.34
+suma de aportes SHAP:        0.36
+probabilidad reconstruida:   0.70
+probabilidad del modelo:     0.70
+```
+
+Si hay una diferencia pequeña entre `reconstructed_probability` y `model_probability`, no es un problema para la clase. Puede pasar por redondeos o por el tipo de explicador usado por SHAP.
 
 ---
 
