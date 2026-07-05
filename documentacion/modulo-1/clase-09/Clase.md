@@ -499,6 +499,200 @@ probabilidad del modelo:     0.70
 
 Si hay una diferencia pequeña entre `reconstructed_probability` y `model_probability`, no es un problema para la clase. Puede pasar por redondeos o por el tipo de explicador usado por SHAP.
 
+### 7. Explicar una solicitud real con tus propias features
+
+El caso anterior sale del dataset de prueba. Ahora haremos algo más cercano al sistema real: tomar las features de una solicitud específica y pedirle al notebook que explique ese applicant.
+
+Los alumnos pueden reemplazar este bloque por las features que tengan en su propia aplicación.
+
+```python
+# Creamos un payload parecido al que devuelve nuestro backend.
+application_payload = {
+    # Dentro de features ponemos los datos ya preparados por Clase 5.
+    "features": {
+        # Identificador real de la solicitud que queremos explicar.
+        "application_id": "dd7b3608-14b3-4426-a927-d92ead8aa9de",
+
+        # Ingreso neto mensual del applicant.
+        "net_monthly_income": 10400.0,
+
+        # Pago mensual de deudas existentes.
+        "monthly_debt_payment": 2850.0,
+
+        # Gastos mensuales declarados.
+        "monthly_expenses": 4500.0,
+
+        # Valor del inmueble.
+        "property_value": 700000.0,
+
+        # Monto solicitado.
+        "requested_amount": 500000.0,
+
+        # Plazo solicitado en meses.
+        "requested_term_months": 240,
+
+        # Cuota estimada del nuevo crédito.
+        "estimated_monthly_payment": 2083.33,
+
+        # Relación deuda mensual / ingreso mensual.
+        "debt_to_income_ratio": 0.274,
+
+        # Relación monto solicitado / valor inmueble.
+        "loan_to_value_ratio": 0.7143,
+
+        # Relación cuota estimada / ingreso mensual.
+        "payment_to_income_ratio": 0.2003,
+
+        # Relación gastos mensuales / ingreso mensual.
+        "expense_to_income_ratio": 0.4327,
+
+        # Relación deuda + gastos + nueva cuota / ingreso mensual.
+        "total_obligations_to_income_ratio": 0.9071,
+
+        # Score de estabilidad laboral.
+        "employment_stability_score": 40,
+
+        # Score de capacidad bancaria.
+        "banking_capacity_score": 40,
+
+        # Score de historial crediticio.
+        "credit_history_score": 76,
+
+        # Etiqueta sintética usada para entrenamiento, no para predecir este caso.
+        "synthetic_risk_label": 0,
+    }
+}
+
+# Sacamos solo el diccionario interno de features.
+application_features = application_payload["features"]
+
+# Guardamos el application_id para incluirlo en la explicación final.
+real_application_id = application_features["application_id"]
+
+# Creamos un DataFrame con una sola fila.
+# Usamos únicamente RISK_FEATURES porque son las variables que espera el modelo de riesgo.
+real_case = pd.DataFrame([{
+    feature: application_features[feature]
+    for feature in RISK_FEATURES
+}])
+
+# Calculamos la probabilidad de default para esta solicitud real.
+real_probability = risk_model.predict_proba(real_case)[0][1]
+
+# Calculamos los valores SHAP para esta solicitud real.
+real_shap = explainer(real_case)[:, :, 1]
+
+# Extraemos el valor base de SHAP.
+real_base_value = float(real_shap.base_values[0])
+
+# Sumamos todos los aportes SHAP de las variables.
+real_contributions_sum = float(real_shap.values[0].sum())
+
+# Reconstruimos la probabilidad usando base + aportes.
+real_reconstructed_probability = real_base_value + real_contributions_sum
+
+# Construimos el JSON de explicación para esta solicitud.
+real_risk_explanation = {
+    # Guardamos el identificador de la solicitud.
+    "application_id": real_application_id,
+
+    # Guardamos la predicción del modelo.
+    "risk": {
+        # Probabilidad de default calculada por el modelo.
+        "default_probability": round(float(real_probability), 4),
+
+        # Etiqueta de riesgo según threshold 0.5.
+        "risk_label": "HIGH" if real_probability >= 0.5 else "LOW",
+    },
+
+    # Guardamos el resumen SHAP para verificar la suma.
+    "shap_summary": {
+        # Punto de partida del modelo según SHAP.
+        "base_value": round(real_base_value, 6),
+
+        # Suma de aportes de todas las variables.
+        "contributions_sum": round(real_contributions_sum, 6),
+
+        # Resultado de base + aportes.
+        "reconstructed_probability": round(real_reconstructed_probability, 6),
+
+        # Probabilidad directa calculada por el modelo.
+        "model_probability": round(float(real_probability), 6),
+    },
+
+    # Lista de variables con sus valores y aportes.
+    "risk_explanation": [
+        {
+            # Nombre de la variable.
+            "feature": feature,
+
+            # Valor de esa variable en la solicitud real.
+            "value": float(real_case.iloc[0][feature]),
+
+            # Aporte SHAP de esa variable.
+            "contribution": round(float(contribution), 6),
+        }
+
+        # Recorremos cada feature con su contribución SHAP.
+        for feature, contribution in zip(RISK_FEATURES, real_shap.values[0])
+    ],
+}
+
+# Ordenamos las variables por impacto absoluto.
+real_risk_explanation["risk_explanation"] = sorted(
+    # Lista original de aportes.
+    real_risk_explanation["risk_explanation"],
+
+    # Criterio de ordenamiento: tamaño del aporte.
+    key=lambda item: abs(item["contribution"]),
+
+    # Mayor impacto primero.
+    reverse=True,
+)
+
+# Imprimimos la explicación completa.
+print(json.dumps(real_risk_explanation, indent=2))
+```
+
+También podemos imprimir una explicación corta en español:
+
+```python
+# Tomamos las tres variables que más influyeron en la predicción.
+top_risk_reasons = real_risk_explanation["risk_explanation"][:3]
+
+# Imprimimos la predicción principal.
+print(
+    f'El modelo predice riesgo {real_risk_explanation["risk"]["risk_label"]} '
+    f'con probabilidad de default {real_probability:.2%}.'
+)
+
+# Imprimimos las razones principales.
+print("Principales variables que explican la predicción:")
+
+# Recorremos las tres variables más importantes.
+for index, reason in enumerate(top_risk_reasons, start=1):
+    # contribution > 0 significa que sube el riesgo.
+    direction = "sube el riesgo" if reason["contribution"] > 0 else "baja el riesgo"
+
+    # Imprimimos una línea entendible para el alumno.
+    print(
+        f'{index}. {reason["feature"]}: valor {reason["value"]}, '
+        f'aporte {reason["contribution"]:+.6f} ({direction})'
+    )
+```
+
+Salida esperada aproximada:
+
+```txt
+El modelo predice riesgo LOW con probabilidad de default 38.20%.
+Principales variables que explican la predicción:
+1. total_obligations_to_income_ratio: valor 0.9071, aporte +0.120000 (sube el riesgo)
+2. credit_history_score: valor 76.0, aporte -0.080000 (baja el riesgo)
+3. employment_stability_score: valor 40.0, aporte +0.060000 (sube el riesgo)
+```
+
+Los números pueden variar según el dataset y el entrenamiento, pero esta celda debe mostrar claramente qué variables suben o bajan el riesgo de la solicitud real.
+
 ---
 
 ## Parte práctica B: notebook de explicabilidad para monto
