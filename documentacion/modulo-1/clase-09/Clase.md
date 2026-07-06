@@ -728,6 +728,52 @@ Los números pueden variar según el dataset y el entrenamiento, pero esta celda
 
 ## Parte práctica B: notebook de explicabilidad para monto
 
+### 0. Preparar datos para la Parte B
+
+La Parte B usa el mismo `df` que cargamos en la Parte A.
+
+Si ejecutaste toda la Parte A, esta celda solo confirmará que `df` ya existe. Si entraste directo a la Parte B, esta celda volverá a leer el CSV desde S3.
+
+```python
+# Importamos io para leer bytes descargados desde S3 como archivo en memoria.
+import io
+
+# Importamos boto3 para leer el CSV desde S3.
+import boto3
+
+# Importamos numpy para cálculos numéricos.
+import numpy as np
+
+# Importamos pandas para trabajar con DataFrames.
+import pandas as pd
+
+# Importamos shap para explicar el modelo de monto.
+import shap
+
+# Importamos train_test_split por si no se ejecutó la Parte A.
+from sklearn.model_selection import train_test_split
+
+# Si BUCKET no existe porque saltamos la Parte A, lo definimos aquí.
+if "BUCKET" not in globals():
+    BUCKET = "docente-980921750553-us-east-1-an"
+
+# Si CSV_KEY no existe porque saltamos la Parte A, lo definimos aquí.
+if "CSV_KEY" not in globals():
+    CSV_KEY = "synthetic_mortgage_dataset.csv"
+
+# Si s3 no existe porque saltamos la Parte A, creamos el cliente.
+if "s3" not in globals():
+    s3 = boto3.client("s3")
+
+# Si df no existe, lo cargamos desde S3.
+if "df" not in globals():
+    response = s3.get_object(Bucket=BUCKET, Key=CSV_KEY)
+    df = pd.read_csv(io.BytesIO(response["Body"].read()))
+
+# Mostramos las primeras filas para confirmar que el dataset está listo.
+df.head()
+```
+
 ### 1. Entrenar XGBoost para explicación
 
 ```python
