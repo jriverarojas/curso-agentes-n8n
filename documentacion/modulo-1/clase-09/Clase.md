@@ -503,7 +503,37 @@ Si hay una diferencia pequeña entre `reconstructed_probability` y `model_probab
 
 El caso anterior sale del dataset de prueba. Ahora haremos algo más cercano al sistema real: tomar las features de una solicitud específica y pedirle al notebook que explique ese applicant.
 
-Los alumnos pueden reemplazar este bloque por las features que tengan en su propia aplicación.
+Importante:
+
+```txt
+El application_id no existe cuando entrenamos el modelo.
+El application_id aparece recién cuando ya se creó una solicitud en el sistema.
+```
+
+Por eso hay dos tipos de JSON de explicación:
+
+| Tipo de JSON | Cuándo se genera | Tiene `application_id` |
+|--------------|------------------|------------------------|
+| Explicación global | Después de entrenar el modelo | No |
+| Explicación local | Después de tener una solicitud concreta con features | Sí |
+
+En esta clase usamos un `application_id` de ejemplo porque ya tenemos una solicitud creada en el ambiente del curso.
+
+Los alumnos pueden reemplazar este bloque por las features de su propia aplicación cuando ya tengan:
+
+```txt
+1. application_id creado;
+2. documentos procesados;
+3. features calculadas por Clase 5.
+```
+
+Si todavía no tienen un `application_id`, pueden hacer el ejercicio con un identificador temporal, por ejemplo:
+
+```txt
+application_id = "demo-application"
+```
+
+Pero para que el endpoint de NestJS funcione con una solicitud real, el archivo debe guardarse usando el `application_id` real.
 
 ```python
 # Creamos un payload parecido al que devuelve nuestro backend.
@@ -700,10 +730,13 @@ Los números pueden variar según el dataset y el entrenamiento, pero esta celda
 ### 1. Entrenar XGBoost para explicación
 
 ```python
+# Importamos XGBRegressor para entrenar el modelo de monto recomendado.
 from xgboost import XGBRegressor
 
+# Ruta donde guardaremos la explicación global del modelo de monto.
 AMOUNT_EXPLANATION_KEY = "ml/explanations/amount_global_explanation.json"
 
+# Variables que usará el modelo de monto.
 AMOUNT_FEATURES = [
     "net_monthly_income",
     "monthly_debt_payment",
@@ -722,47 +755,93 @@ AMOUNT_FEATURES = [
     "credit_history_score",
 ]
 
+# X_amount contiene las variables de entrada para el modelo de monto.
 X_amount = df[AMOUNT_FEATURES]
+
+# y_amount contiene el valor que queremos predecir: monto recomendado.
 y_amount = df["recommended_amount"]
 
+# Separamos datos de entrenamiento y prueba.
 X_train_amount, X_test_amount, y_train_amount, y_test_amount = train_test_split(
+    # Variables de entrada.
     X_amount,
+
+    # Variable objetivo.
     y_amount,
+
+    # Usamos 20% para prueba.
     test_size=0.2,
+
+    # Fijamos la aleatoriedad para repetir resultados.
     random_state=42,
 )
 
+# Creamos el modelo XGBoost de regresión.
 amount_model = XGBRegressor(
+    # Indicamos que queremos resolver un problema de regresión.
     objective="reg:squarederror",
+
+    # Número de árboles que usará el modelo.
     n_estimators=180,
+
+    # Profundidad máxima de cada árbol.
     max_depth=4,
+
+    # Velocidad de aprendizaje.
     learning_rate=0.08,
+
+    # Porcentaje de filas usadas en cada árbol.
     subsample=0.85,
+
+    # Porcentaje de columnas usadas en cada árbol.
     colsample_bytree=0.9,
+
+    # Semilla para repetir resultados.
     random_state=42,
 )
 
+# Entrenamos el modelo de monto.
 amount_model.fit(X_train_amount, y_train_amount)
 ```
 
 ### 2. Calcular SHAP global del modelo de monto
 
 ```python
+# Creamos el explicador SHAP para XGBoost.
+# Usamos 100 filas de entrenamiento como background o referencia.
 amount_explainer = shap.Explainer(amount_model, X_train_amount.sample(100, random_state=42))
+
+# Tomamos 200 casos para calcular importancia global.
 amount_sample = X_test_amount.sample(200, random_state=42)
+
+# Calculamos valores SHAP para esos 200 casos.
 amount_shap_values = amount_explainer(amount_sample)
 
+# Calculamos importancia promedio por variable.
 amount_importance = np.abs(amount_shap_values.values).mean(axis=0)
 
+# Construimos el JSON de explicación global del modelo de monto.
 amount_global = {
+    # Nombre del modelo.
     "model": "amount_xgboost_regressor",
+
+    # Explicación global significa importancia general de variables.
     "explanation_type": "global",
+
+    # Objetivo que explica este modelo.
     "target": "recommended_amount",
+
+    # Variables más importantes ordenadas.
     "top_features": [
         {
+            # Nombre de la variable.
             "feature": feature,
+
+            # Importancia promedio de esa variable.
             "importance": round(float(importance), 2),
         }
+
+        # Ordenamos las variables por importancia descendente.
         for feature, importance in sorted(
             zip(AMOUNT_FEATURES, amount_importance),
             key=lambda item: item[1],
@@ -771,36 +850,71 @@ amount_global = {
     ],
 }
 
+# Imprimimos el JSON global.
 print(json.dumps(amount_global, indent=2))
 ```
 
 ### 3. Guardar explicación global de monto en S3
 
 ```python
+# Subimos la explicación global del modelo de monto a S3.
 s3.put_object(
+    # Bucket destino.
     Bucket=BUCKET,
+
+    # Ruta del JSON dentro de S3.
     Key=AMOUNT_EXPLANATION_KEY,
+
+    # Convertimos el diccionario a JSON y luego a bytes.
     Body=json.dumps(amount_global, indent=2).encode("utf-8"),
+
+    # Indicamos que es un archivo JSON.
     ContentType="application/json",
 )
 
+# Mostramos la ruta final.
 print(f"Uploaded s3://{BUCKET}/{AMOUNT_EXPLANATION_KEY}")
 ```
 
-### 4. Crear explicación combinada para una aplicación
+### 4. Explicar un caso cualquiera del modelo de monto
+
+Primero explicaremos un caso del conjunto de prueba, igual que hicimos con riesgo.
 
 ```python
-amount_case = X_test_amount.loc[[case.index[0]]]
+# Tomamos un caso cualquiera del conjunto de prueba.
+amount_case = X_test_amount.iloc[[0]]
+
+# Calculamos el monto recomendado por el modelo.
 amount_prediction = amount_model.predict(amount_case)[0]
+
+# Calculamos los valores SHAP para ese caso.
 amount_case_shap = amount_explainer(amount_case)
 
-combined_explanation = {
-    "application_id": str(case_application_id),
-    "risk": risk_local["risk"],
-    "risk_explanation": risk_local["risk_explanation"][:5],
+# Extraemos el valor base de SHAP.
+amount_base_value = float(amount_case_shap.base_values[0])
+
+# Sumamos los aportes de todas las variables.
+amount_contributions_sum = float(amount_case_shap.values[0].sum())
+
+# Reconstruimos el monto recomendado con base + aportes.
+amount_reconstructed_prediction = amount_base_value + amount_contributions_sum
+
+# Creamos el JSON de explicación local de monto.
+amount_local = {
+    # Predicción del modelo.
     "amount": {
         "recommended_amount": round(float(amount_prediction), 2),
     },
+
+    # Resumen SHAP para comprobar la suma.
+    "shap_summary": {
+        "base_value": round(amount_base_value, 2),
+        "contributions_sum": round(amount_contributions_sum, 2),
+        "reconstructed_amount": round(amount_reconstructed_prediction, 2),
+        "model_prediction": round(float(amount_prediction), 2),
+    },
+
+    # Aporte de cada variable.
     "amount_explanation": [
         {
             "feature": feature,
@@ -811,13 +925,165 @@ combined_explanation = {
     ],
 }
 
-combined_explanation["amount_explanation"] = sorted(
-    combined_explanation["amount_explanation"],
+# Ordenamos las variables por impacto absoluto.
+amount_local["amount_explanation"] = sorted(
+    amount_local["amount_explanation"],
     key=lambda item: abs(item["contribution"]),
     reverse=True,
-)[:5]
+)
 
-application_key = f"{APPLICATION_EXPLANATIONS_PREFIX}/{case_application_id}.json"
+# Imprimimos la explicación.
+print(json.dumps(amount_local, indent=2))
+```
+
+La idea es la misma que en riesgo:
+
+```txt
+valor base + aportes de variables = monto recomendado explicado
+```
+
+Pero ahora la salida no es una probabilidad. La salida es dinero:
+
+```txt
+base_value:              380000
+suma de aportes SHAP:     42000
+monto reconstruido:      422000
+predicción del modelo:   422000
+```
+
+### 5. Explicar monto usando la misma solicitud real
+
+Ahora usaremos el mismo `application_payload` de la parte de riesgo.
+
+Los alumnos pueden reemplazar ese JSON por sus propias features.
+
+```python
+# Creamos un DataFrame de una sola fila usando las variables del modelo de monto.
+real_amount_case = pd.DataFrame([{
+    feature: application_features[feature]
+    for feature in AMOUNT_FEATURES
+}])
+
+# Calculamos el monto recomendado para la solicitud real.
+real_amount_prediction = amount_model.predict(real_amount_case)[0]
+
+# Calculamos SHAP para explicar la recomendación de monto.
+real_amount_shap = amount_explainer(real_amount_case)
+
+# Extraemos el valor base.
+real_amount_base_value = float(real_amount_shap.base_values[0])
+
+# Sumamos los aportes de todas las variables.
+real_amount_contributions_sum = float(real_amount_shap.values[0].sum())
+
+# Reconstruimos el monto con base + aportes.
+real_amount_reconstructed = real_amount_base_value + real_amount_contributions_sum
+
+# Creamos la explicación local de monto para la solicitud real.
+real_amount_explanation = {
+    # Identificador de la solicitud.
+    "application_id": real_application_id,
+
+    # Predicción del modelo de monto.
+    "amount": {
+        "requested_amount": float(application_features["requested_amount"]),
+        "recommended_amount": round(float(real_amount_prediction), 2),
+    },
+
+    # Resumen SHAP.
+    "shap_summary": {
+        "base_value": round(real_amount_base_value, 2),
+        "contributions_sum": round(real_amount_contributions_sum, 2),
+        "reconstructed_amount": round(real_amount_reconstructed, 2),
+        "model_prediction": round(float(real_amount_prediction), 2),
+    },
+
+    # Aportes por variable.
+    "amount_explanation": [
+        {
+            "feature": feature,
+            "value": float(real_amount_case.iloc[0][feature]),
+            "contribution": round(float(contribution), 2),
+        }
+        for feature, contribution in zip(AMOUNT_FEATURES, real_amount_shap.values[0])
+    ],
+}
+
+# Ordenamos por impacto absoluto.
+real_amount_explanation["amount_explanation"] = sorted(
+    real_amount_explanation["amount_explanation"],
+    key=lambda item: abs(item["contribution"]),
+    reverse=True,
+)
+
+# Imprimimos la explicación de monto.
+print(json.dumps(real_amount_explanation, indent=2))
+```
+
+También imprimimos una explicación simple en español:
+
+```python
+# Tomamos las tres variables con más impacto sobre el monto.
+top_amount_reasons = real_amount_explanation["amount_explanation"][:3]
+
+# Imprimimos el resumen de la recomendación.
+print(
+    f'El modelo recomienda un monto de {real_amount_prediction:,.2f}. '
+    f'El monto solicitado era {application_features["requested_amount"]:,.2f}.'
+)
+
+# Imprimimos las variables principales.
+print("Principales variables que explican el monto recomendado:")
+
+# Recorremos las razones principales.
+for index, reason in enumerate(top_amount_reasons, start=1):
+    # En regresión, aporte positivo sube el monto recomendado.
+    direction = "sube el monto recomendado" if reason["contribution"] > 0 else "baja el monto recomendado"
+
+    # Imprimimos una línea legible.
+    print(
+        f'{index}. {reason["feature"]}: valor {reason["value"]}, '
+        f'aporte {reason["contribution"]:+,.2f} ({direction})'
+    )
+```
+
+Salida esperada aproximada:
+
+```txt
+El modelo recomienda un monto de 390,000.00. El monto solicitado era 500,000.00.
+Principales variables que explican el monto recomendado:
+1. net_monthly_income: valor 10400.0, aporte -45000.00 (baja el monto recomendado)
+2. total_obligations_to_income_ratio: valor 0.9071, aporte -38000.00 (baja el monto recomendado)
+3. property_value: valor 700000.0, aporte +25000.00 (sube el monto recomendado)
+```
+
+Los números exactos pueden variar según el entrenamiento, pero la lectura debe ser clara: algunas variables empujan el monto recomendado hacia arriba y otras hacia abajo.
+
+### 6. Crear explicación combinada para una aplicación
+
+```python
+# Unimos la explicación de riesgo y la explicación de monto de la solicitud real.
+combined_explanation = {
+    # Identificador de la solicitud.
+    "application_id": real_application_id,
+
+    # Resultado del modelo de riesgo.
+    "risk": real_risk_explanation["risk"],
+
+    # Top 5 explicaciones de riesgo.
+    "risk_explanation": real_risk_explanation["risk_explanation"][:5],
+
+    # Resultado del modelo de monto.
+    "amount": real_amount_explanation["amount"],
+
+    # Top 5 explicaciones de monto.
+    "amount_explanation": real_amount_explanation["amount_explanation"][:5],
+}
+
+# Ruta donde guardaremos la explicación local combinada.
+application_key = f"{APPLICATION_EXPLANATIONS_PREFIX}/{real_application_id}.json"
+
+# Subimos el JSON combinado a S3.
 s3.put_object(
     Bucket=BUCKET,
     Key=application_key,
@@ -839,9 +1105,200 @@ EXPLAIN_UMBRELLA_KEY=ml/explanations/umbrella_explanation.json
 EXPLAIN_RISK_GLOBAL_KEY=ml/explanations/risk_global_explanation.json
 EXPLAIN_AMOUNT_GLOBAL_KEY=ml/explanations/amount_global_explanation.json
 EXPLAIN_APPLICATIONS_PREFIX=ml/explanations/applications
+PYTHON_EXPLAINER_BIN=python
+PYTHON_EXPLAINER_SCRIPT=python-explainer/generate_explanation.py
 ```
 
-Endpoints:
+### 1. Qué vamos a construir
+
+En esta versión NestJS usará un pequeño proyecto Python para generar explicaciones.
+
+El flujo será:
+
+```txt
+NestJS recibe request
+-> NestJS busca features de la aplicación
+-> NestJS llama script Python
+-> Python lee modelos JSON desde S3
+-> Python genera explicación
+-> NestJS guarda la explicación local en S3
+-> NestJS devuelve el JSON
+```
+
+Hay una diferencia clave entre explicación global y local:
+
+```txt
+Explicación global:
+se genera una vez para el modelo completo.
+No necesita application_id.
+
+Explicación local:
+se genera para una solicitud específica usando Python.
+Sí necesita application_id porque NestJS debe buscar las features de esa solicitud.
+```
+
+Entonces, si todavía no existe una solicitud, solo puedes consultar explicaciones globales.
+
+La explicación local se genera después de que el sistema ya creó la solicitud y ya calculó sus features.
+
+Archivos que crearemos o modificaremos:
+
+| Archivo | Qué haremos |
+|---------|-------------|
+| `python-explainer/requirements.txt` | Librerías Python necesarias |
+| `python-explainer/generate_explanation.py` | Script Python que genera explicaciones |
+| `src/modulo1/clase09/clase09.controller.ts` | Crear endpoints HTTP para consultar explicaciones |
+| `src/modulo1/clase09/clase09.service.ts` | Llamar el script Python y guardar resultados |
+| `src/modulo1/modulo1.module.ts` | Registrar controller y service |
+| `.env` | Configurar rutas S3 y Python |
+
+### 2. Crear proyecto Python de explicabilidad
+
+Crea esta carpeta dentro del proyecto NestJS:
+
+```txt
+python-explainer
+```
+
+Dentro crea:
+
+```txt
+python-explainer/requirements.txt
+python-explainer/generate_explanation.py
+```
+
+`requirements.txt`:
+
+```txt
+boto3==1.40.0
+numpy==2.2.6
+```
+
+Para mantener la clase simple, este script no recalcula SHAP real para XGBoost. Hace dos cosas:
+
+```txt
+Riesgo:
+usa coeficientes de la regresión logística para explicar aportes locales.
+
+Monto:
+usa los caminos de los árboles XGBoost para aproximar qué variables empujan el monto.
+```
+
+Esto es suficiente para clase porque permite ver:
+
+```txt
+modelo JSON + features -> explicación local -> JSON final
+```
+
+### 3. Instalar Python en macOS
+
+Desde la carpeta del proyecto:
+
+```bash
+cd solucion
+python3 -m venv .venv-explainer
+source .venv-explainer/bin/activate
+pip install -r python-explainer/requirements.txt
+```
+
+Luego en `.env` usa:
+
+```env
+PYTHON_EXPLAINER_BIN=.venv-explainer/bin/python
+PYTHON_EXPLAINER_SCRIPT=python-explainer/generate_explanation.py
+```
+
+Prueba rápida:
+
+```bash
+.venv-explainer/bin/python python-explainer/generate_explanation.py --help
+```
+
+### 4. Instalar Python en Windows
+
+Desde PowerShell, en la carpeta del proyecto:
+
+```powershell
+cd solucion
+py -m venv .venv-explainer
+.\.venv-explainer\Scripts\Activate.ps1
+pip install -r python-explainer\requirements.txt
+```
+
+Luego en `.env` usa:
+
+```env
+PYTHON_EXPLAINER_BIN=.venv-explainer\Scripts\python.exe
+PYTHON_EXPLAINER_SCRIPT=python-explainer\generate_explanation.py
+```
+
+Prueba rápida:
+
+```powershell
+.\.venv-explainer\Scripts\python.exe python-explainer\generate_explanation.py --help
+```
+
+Si PowerShell bloquea el entorno virtual, ejecuta:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+### 5. Crear el controller de Clase 9
+
+Crea el archivo:
+
+```txt
+src/modulo1/clase09/clase09.controller.ts
+```
+
+Código:
+
+```ts
+import { Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { ApiKeyGuard } from '../../auth/guards/api-key.guard';
+import { Clase09Service } from './clase09.service';
+
+@Controller('modulo1/clase09')
+@UseGuards(ApiKeyGuard)
+export class Clase09Controller {
+  constructor(private readonly clase09: Clase09Service) {}
+
+  @Get('explanations/umbrella')
+  async getUmbrellaExplanation() {
+    return await this.clase09.getUmbrellaExplanation();
+  }
+
+  @Get('explanations/risk/global')
+  async getRiskGlobalExplanation() {
+    return await this.clase09.getRiskGlobalExplanation();
+  }
+
+  @Get('explanations/amount/global')
+  async getAmountGlobalExplanation() {
+    return await this.clase09.getAmountGlobalExplanation();
+  }
+
+  @Get('explanations/compare')
+  async compareExplanations() {
+    return await this.clase09.compareExplanations();
+  }
+
+  @Get('applications/:applicationId/explanation')
+  async getApplicationExplanation(@Param('applicationId') applicationId: string) {
+    return await this.clase09.getApplicationExplanation(applicationId);
+  }
+
+  @Post('applications/:applicationId/explanation/generate')
+  async generateApplicationExplanation(
+    @Param('applicationId') applicationId: string,
+  ) {
+    return await this.clase09.generateApplicationExplanation(applicationId);
+  }
+}
+```
+
+Qué hace cada endpoint:
 
 | Endpoint | Qué devuelve |
 |----------|--------------|
@@ -850,8 +1307,273 @@ Endpoints:
 | `GET /modulo1/clase09/explanations/amount/global` | importancia global del modelo de monto |
 | `GET /modulo1/clase09/explanations/compare` | comparación de explicaciones globales |
 | `GET /modulo1/clase09/applications/:applicationId/explanation` | explicación local combinada |
+| `POST /modulo1/clase09/applications/:applicationId/explanation/generate` | genera explicación local llamando Python y la guarda en S3 |
 
-Prueba:
+### 6. Crear el service de Clase 9
+
+Crea el archivo:
+
+```txt
+src/modulo1/clase09/clase09.service.ts
+```
+
+Código:
+
+```ts
+import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { InjectRepository } from '@nestjs/typeorm';
+import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+import { Repository } from 'typeorm';
+import { CreditFeatureSet } from '../../entities/credit-feature-set.entity';
+
+const execFileAsync = promisify(execFile);
+
+@Injectable()
+export class Clase09Service {
+  private readonly s3: S3Client;
+
+  constructor(
+    private readonly config: ConfigService,
+    @InjectRepository(CreditFeatureSet)
+    private readonly featureSets: Repository<CreditFeatureSet>,
+  ) {
+    this.s3 = new S3Client({
+      region: this.config.getOrThrow<string>('AWS_REGION'),
+    });
+  }
+
+  async getUmbrellaExplanation() {
+    return await this.readGlobalWithPython(
+      this.config.getOrThrow<string>('EXPLAIN_UMBRELLA_KEY'),
+    );
+  }
+
+  async getRiskGlobalExplanation() {
+    return await this.readGlobalWithPython(
+      this.config.getOrThrow<string>('EXPLAIN_RISK_GLOBAL_KEY'),
+    );
+  }
+
+  async getAmountGlobalExplanation() {
+    return await this.readGlobalWithPython(
+      this.config.getOrThrow<string>('EXPLAIN_AMOUNT_GLOBAL_KEY'),
+    );
+  }
+
+  async compareExplanations() {
+    return {
+      riskModel: await this.getRiskGlobalExplanation(),
+      amountModel: await this.getAmountGlobalExplanation(),
+    };
+  }
+
+  async getApplicationExplanation(applicationId: string) {
+    const prefix = this.config.getOrThrow<string>(
+      'EXPLAIN_APPLICATIONS_PREFIX',
+    );
+
+    return await this.readJson(`${prefix}/${applicationId}.json`);
+  }
+
+  async generateApplicationExplanation(applicationId: string) {
+    const featureSet = await this.featureSets.findOne({
+      where: { applicationId },
+    });
+
+    if (!featureSet) {
+      throw new NotFoundException('Feature set not found for this application');
+    }
+
+    const features = this.buildExplanationFeatures(featureSet);
+    const result = await this.runPythonLocalExplanation(applicationId, features);
+
+    const prefix = this.config.getOrThrow<string>(
+      'EXPLAIN_APPLICATIONS_PREFIX',
+    );
+    const key = `${prefix}/${applicationId}.json`;
+
+    await this.s3.send(
+      new PutObjectCommand({
+        Bucket: this.config.getOrThrow<string>('SAGEMAKER_BUCKET'),
+        Key: key,
+        Body: JSON.stringify(result, null, 2),
+        ContentType: 'application/json',
+      }),
+    );
+
+    return {
+      ...result,
+      s3Key: key,
+    };
+  }
+
+  private async readGlobalWithPython(key: string) {
+    return await this.runPython([
+      '--mode',
+      'read-global',
+      '--bucket',
+      this.config.getOrThrow<string>('SAGEMAKER_BUCKET'),
+      '--key',
+      key,
+    ]);
+  }
+
+  private async runPythonLocalExplanation(
+    applicationId: string,
+    features: Record<string, number>,
+  ) {
+    const dir = await mkdtemp(join(tmpdir(), 'clase09-explainer-'));
+    const inputPath = join(dir, 'features.json');
+
+    try {
+      await writeFile(
+        inputPath,
+        JSON.stringify({ application_id: applicationId, features }, null, 2),
+        'utf-8',
+      );
+
+      return await this.runPython([
+        '--mode',
+        'local',
+        '--bucket',
+        this.config.getOrThrow<string>('SAGEMAKER_BUCKET'),
+        '--input',
+        inputPath,
+        '--risk-model-key',
+        this.config.getOrThrow<string>('SAGEMAKER_RISK_MODEL_PARAMS_KEY'),
+        '--amount-model-key',
+        this.config.getOrThrow<string>('SAGEMAKER_AMOUNT_MODEL_KEY'),
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  private async runPython(args: string[]) {
+    const pythonBin = this.config.get<string>('PYTHON_EXPLAINER_BIN') || 'python';
+    const scriptPath =
+      this.config.get<string>('PYTHON_EXPLAINER_SCRIPT') ||
+      join(process.cwd(), 'python-explainer', 'generate_explanation.py');
+
+    const { stdout } = await execFileAsync(pythonBin, [scriptPath, ...args], {
+      maxBuffer: 1024 * 1024 * 10,
+      env: process.env,
+    });
+
+    return JSON.parse(stdout);
+  }
+
+  private buildExplanationFeatures(featureSet: CreditFeatureSet) {
+    const payload = featureSet.featuresPayload ?? {};
+    return this.pickNumericFeatures({
+      ...payload,
+      debt_to_income_ratio: featureSet.debtToIncomeRatio,
+      loan_to_value_ratio: featureSet.loanToValueRatio,
+      payment_to_income_ratio: featureSet.paymentToIncomeRatio,
+      expense_to_income_ratio: featureSet.expenseToIncomeRatio,
+      total_obligations_to_income_ratio:
+        featureSet.totalObligationsToIncomeRatio,
+      employment_stability_score: featureSet.employmentStabilityScore,
+      banking_capacity_score: featureSet.bankingCapacityScore,
+      credit_history_score: featureSet.creditHistoryScore,
+    });
+  }
+
+  private pickNumericFeatures(source: Record<string, unknown>) {
+    const names = [
+      'net_monthly_income',
+      'monthly_debt_payment',
+      'monthly_expenses',
+      'property_value',
+      'requested_amount',
+      'requested_term_months',
+      'estimated_monthly_payment',
+      'debt_to_income_ratio',
+      'loan_to_value_ratio',
+      'payment_to_income_ratio',
+      'expense_to_income_ratio',
+      'total_obligations_to_income_ratio',
+      'employment_stability_score',
+      'banking_capacity_score',
+      'credit_history_score',
+    ];
+
+    return Object.fromEntries(
+      names.map((name) => [name, this.toNumber(source[name])]),
+    );
+  }
+
+  private async readJson(key: string) {
+    const response = await this.s3.send(
+      new GetObjectCommand({
+        Bucket: this.config.getOrThrow<string>('SAGEMAKER_BUCKET'),
+        Key: key,
+      }),
+    );
+
+    return JSON.parse(await response.Body!.transformToString());
+  }
+
+  private toNumber(value: unknown) {
+    const numberValue = Number(value);
+    if (!Number.isFinite(numberValue)) {
+      throw new NotFoundException('Application has incomplete explanation features');
+    }
+    return numberValue;
+  }
+}
+```
+
+La idea principal está aquí:
+
+```ts
+const result = await this.runPythonLocalExplanation(applicationId, features);
+```
+
+NestJS no recalcula la explicación en TypeScript. Le entrega las features al script Python y Python devuelve el JSON.
+
+### 7. Registrar Clase 9 en el módulo
+
+Abre:
+
+```txt
+src/modulo1/modulo1.module.ts
+```
+
+Agrega imports:
+
+```ts
+import { Clase09Controller } from './clase09/clase09.controller';
+import { Clase09Service } from './clase09/clase09.service';
+```
+
+Agrega el controller:
+
+```ts
+controllers: [
+  Clase09Controller,
+]
+```
+
+Agrega el service:
+
+```ts
+providers: [
+  Clase09Service,
+]
+```
+
+En el archivo real habrá más clases registradas. No borres las anteriores. Solo agrega Clase 9.
+
+### 8. Probar endpoints
+
+Comparar explicaciones globales:
 
 ```bash
 curl http://localhost:3000/modulo1/clase09/explanations/compare \
@@ -859,12 +1581,83 @@ curl http://localhost:3000/modulo1/clase09/explanations/compare \
   -H "x-api-secret: pass1"
 ```
 
-Explicación local:
+Resultado esperado:
+
+```json
+{
+  "riskModel": {
+    "model": "risk_logistic_regression",
+    "explanation_type": "global",
+    "target": "default_probability",
+    "top_features": []
+  },
+  "amountModel": {
+    "model": "amount_xgboost_regressor",
+    "explanation_type": "global",
+    "target": "recommended_amount",
+    "top_features": []
+  }
+}
+```
+
+Generar explicación local:
 
 ```bash
-curl http://localhost:3000/modulo1/clase09/applications/APP-000123/explanation \
+curl -X POST http://localhost:3000/modulo1/clase09/applications/dd7b3608-14b3-4426-a927-d92ead8aa9de/explanation/generate \
   -H "x-api-key: test1" \
   -H "x-api-secret: pass1"
+```
+
+Resultado esperado:
+
+```json
+{
+  "application_id": "dd7b3608-14b3-4426-a927-d92ead8aa9de",
+  "risk": {
+    "default_probability": 0.382,
+    "risk_label": "LOW",
+    "threshold": 0.5
+  },
+  "risk_explanation": [],
+  "amount": {
+    "requested_amount": 500000,
+    "recommended_amount": 390000
+  },
+  "amount_explanation": [],
+  "s3Key": "ml/explanations/applications/dd7b3608-14b3-4426-a927-d92ead8aa9de.json"
+}
+```
+
+Consultar explicación local:
+
+```bash
+curl http://localhost:3000/modulo1/clase09/applications/dd7b3608-14b3-4426-a927-d92ead8aa9de/explanation \
+  -H "x-api-key: test1" \
+  -H "x-api-secret: pass1"
+```
+
+Resultado esperado:
+
+```json
+{
+  "application_id": "dd7b3608-14b3-4426-a927-d92ead8aa9de",
+  "risk": {
+    "default_probability": 0.382,
+    "risk_label": "LOW"
+  },
+  "risk_explanation": [],
+  "amount": {
+    "requested_amount": 500000,
+    "recommended_amount": 390000
+  },
+  "amount_explanation": []
+}
+```
+
+Si aparece `NoSuchKey`, significa que el JSON local todavía no fue subido a esta ruta:
+
+```txt
+ml/explanations/applications/dd7b3608-14b3-4426-a927-d92ead8aa9de.json
 ```
 
 ## Entrega
