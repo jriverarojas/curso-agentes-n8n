@@ -780,6 +780,9 @@ df.head()
 # Importamos XGBRegressor para entrenar el modelo de monto recomendado.
 from xgboost import XGBRegressor
 
+# Importamos xgboost completo para usar DMatrix y pred_contribs.
+import xgboost as xgb
+
 # Ruta donde guardaremos la explicación global del modelo de monto.
 AMOUNT_EXPLANATION_KEY = "ml/explanations/amount_global_explanation.json"
 
@@ -854,18 +857,25 @@ amount_model.fit(X_train_amount, y_train_amount)
 ### 2. Calcular SHAP global del modelo de monto
 
 ```python
-# Creamos el explicador SHAP específico para modelos basados en árboles.
-# Para XGBoost es más estable usar TreeExplainer que shap.Explainer directo.
-amount_explainer = shap.TreeExplainer(amount_model)
+# Tomamos el booster interno de XGBoost.
+# Usaremos su función nativa pred_contribs=True para obtener aportes tipo SHAP.
+amount_booster = amount_model.get_booster()
 
 # Tomamos 200 casos para calcular importancia global.
 amount_sample = X_test_amount.sample(200, random_state=42)
 
-# Calculamos valores SHAP para esos 200 casos.
-amount_shap_values = amount_explainer(amount_sample)
+# Convertimos la muestra a DMatrix, que es el formato interno de XGBoost.
+amount_sample_matrix = xgb.DMatrix(amount_sample, feature_names=AMOUNT_FEATURES)
+
+# Calculamos contribuciones tipo SHAP usando XGBoost directamente.
+# El resultado trae una columna por feature y una última columna llamada bias o base value.
+amount_contribs = amount_booster.predict(amount_sample_matrix, pred_contribs=True)
+
+# Separamos los aportes de variables.
+amount_feature_contribs = amount_contribs[:, :-1]
 
 # Calculamos importancia promedio por variable.
-amount_importance = np.abs(amount_shap_values.values).mean(axis=0)
+amount_importance = np.abs(amount_feature_contribs).mean(axis=0)
 
 # Construimos el JSON de explicación global del modelo de monto.
 amount_global = {
@@ -934,14 +944,21 @@ amount_case = X_test_amount.iloc[[0]]
 # Calculamos el monto recomendado por el modelo.
 amount_prediction = amount_model.predict(amount_case)[0]
 
-# Calculamos los valores SHAP para ese caso.
-amount_case_shap = amount_explainer(amount_case)
+# Convertimos el caso a DMatrix para XGBoost.
+amount_case_matrix = xgb.DMatrix(amount_case, feature_names=AMOUNT_FEATURES)
 
-# Extraemos el valor base de SHAP.
-amount_base_value = float(amount_case_shap.base_values[0])
+# Calculamos contribuciones tipo SHAP para este caso.
+# La última columna es el valor base; las anteriores son aportes por feature.
+amount_case_contribs = amount_booster.predict(amount_case_matrix, pred_contribs=True)[0]
+
+# Extraemos el valor base.
+amount_base_value = float(amount_case_contribs[-1])
+
+# Extraemos los aportes de las variables.
+amount_case_feature_contribs = amount_case_contribs[:-1]
 
 # Sumamos los aportes de todas las variables.
-amount_contributions_sum = float(amount_case_shap.values[0].sum())
+amount_contributions_sum = float(amount_case_feature_contribs.sum())
 
 # Reconstruimos el monto recomendado con base + aportes.
 amount_reconstructed_prediction = amount_base_value + amount_contributions_sum
@@ -968,7 +985,7 @@ amount_local = {
             "value": float(amount_case.iloc[0][feature]),
             "contribution": round(float(contribution), 2),
         }
-        for feature, contribution in zip(AMOUNT_FEATURES, amount_case_shap.values[0])
+        for feature, contribution in zip(AMOUNT_FEATURES, amount_case_feature_contribs)
     ],
 }
 
@@ -1014,14 +1031,20 @@ real_amount_case = pd.DataFrame([{
 # Calculamos el monto recomendado para la solicitud real.
 real_amount_prediction = amount_model.predict(real_amount_case)[0]
 
-# Calculamos SHAP para explicar la recomendación de monto.
-real_amount_shap = amount_explainer(real_amount_case)
+# Convertimos el caso real a DMatrix.
+real_amount_matrix = xgb.DMatrix(real_amount_case, feature_names=AMOUNT_FEATURES)
+
+# Calculamos contribuciones tipo SHAP para el caso real.
+real_amount_contribs = amount_booster.predict(real_amount_matrix, pred_contribs=True)[0]
 
 # Extraemos el valor base.
-real_amount_base_value = float(real_amount_shap.base_values[0])
+real_amount_base_value = float(real_amount_contribs[-1])
+
+# Extraemos aportes por variable.
+real_amount_feature_contribs = real_amount_contribs[:-1]
 
 # Sumamos los aportes de todas las variables.
-real_amount_contributions_sum = float(real_amount_shap.values[0].sum())
+real_amount_contributions_sum = float(real_amount_feature_contribs.sum())
 
 # Reconstruimos el monto con base + aportes.
 real_amount_reconstructed = real_amount_base_value + real_amount_contributions_sum
@@ -1052,7 +1075,7 @@ real_amount_explanation = {
             "value": float(real_amount_case.iloc[0][feature]),
             "contribution": round(float(contribution), 2),
         }
-        for feature, contribution in zip(AMOUNT_FEATURES, real_amount_shap.values[0])
+        for feature, contribution in zip(AMOUNT_FEATURES, real_amount_feature_contribs)
     ],
 }
 
