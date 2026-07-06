@@ -1018,16 +1018,45 @@ monto reconstruido:      422000
 predicción del modelo:   422000
 ```
 
-### 5. Explicar monto usando la misma solicitud real
+### 5. Explicar monto usando un JSON de solicitud
 
-Ahora usaremos el mismo `application_payload` de la parte de riesgo.
+Ahora haremos la explicación de monto con un JSON propio.
 
-Los alumnos pueden reemplazar ese JSON por sus propias features.
+La práctica de monto debe poder ejecutarse de forma independiente de la práctica de riesgo. Por eso volvemos a declarar los datos de la solicitud.
 
 ```python
+# Creamos un payload independiente para la práctica de monto.
+amount_application_payload = {
+    "features": {
+        "application_id": "dd7b3608-14b3-4426-a927-d92ead8aa9de",
+        "net_monthly_income": 10400.0,
+        "monthly_debt_payment": 2850.0,
+        "monthly_expenses": 4500.0,
+        "property_value": 700000.0,
+        "requested_amount": 500000.0,
+        "requested_term_months": 240,
+        "estimated_monthly_payment": 2083.33,
+        "debt_to_income_ratio": 0.274,
+        "loan_to_value_ratio": 0.7143,
+        "payment_to_income_ratio": 0.2003,
+        "expense_to_income_ratio": 0.4327,
+        "total_obligations_to_income_ratio": 0.9071,
+        "employment_stability_score": 40,
+        "banking_capacity_score": 40,
+        "credit_history_score": 76,
+        "synthetic_risk_label": 0,
+    }
+}
+
+# Extraemos el diccionario de features.
+amount_application_features = amount_application_payload["features"]
+
+# Guardamos el application_id para identificar la explicación.
+amount_application_id = amount_application_features["application_id"]
+
 # Creamos un DataFrame de una sola fila usando las variables del modelo de monto.
 real_amount_case = pd.DataFrame([{
-    feature: application_features[feature]
+    feature: amount_application_features[feature]
     for feature in AMOUNT_FEATURES
 }])
 
@@ -1055,11 +1084,11 @@ real_amount_reconstructed = real_amount_base_value + real_amount_contributions_s
 # Creamos la explicación local de monto para la solicitud real.
 real_amount_explanation = {
     # Identificador de la solicitud.
-    "application_id": real_application_id,
+    "application_id": amount_application_id,
 
     # Predicción del modelo de monto.
     "amount": {
-        "requested_amount": float(application_features["requested_amount"]),
+        "requested_amount": float(amount_application_features["requested_amount"]),
         "recommended_amount": round(float(real_amount_prediction), 2),
     },
 
@@ -1102,7 +1131,7 @@ top_amount_reasons = real_amount_explanation["amount_explanation"][:3]
 # Imprimimos el resumen de la recomendación.
 print(
     f'El modelo recomienda un monto de {real_amount_prediction:,.2f}. '
-    f'El monto solicitado era {application_features["requested_amount"]:,.2f}.'
+    f'El monto solicitado era {amount_application_features["requested_amount"]:,.2f}.'
 )
 
 # Imprimimos las variables principales.
@@ -1131,41 +1160,6 @@ Principales variables que explican el monto recomendado:
 ```
 
 Los números exactos pueden variar según el entrenamiento, pero la lectura debe ser clara: algunas variables empujan el monto recomendado hacia arriba y otras hacia abajo.
-
-### 6. Crear explicación combinada para una aplicación
-
-```python
-# Unimos la explicación de riesgo y la explicación de monto de la solicitud real.
-combined_explanation = {
-    # Identificador de la solicitud.
-    "application_id": real_application_id,
-
-    # Resultado del modelo de riesgo.
-    "risk": real_risk_explanation["risk"],
-
-    # Top 5 explicaciones de riesgo.
-    "risk_explanation": real_risk_explanation["risk_explanation"][:5],
-
-    # Resultado del modelo de monto.
-    "amount": real_amount_explanation["amount"],
-
-    # Top 5 explicaciones de monto.
-    "amount_explanation": real_amount_explanation["amount_explanation"][:5],
-}
-
-# Ruta donde guardaremos la explicación local combinada.
-application_key = f"{APPLICATION_EXPLANATIONS_PREFIX}/{real_application_id}.json"
-
-# Subimos el JSON combinado a S3.
-s3.put_object(
-    Bucket=BUCKET,
-    Key=application_key,
-    Body=json.dumps(combined_explanation, indent=2).encode("utf-8"),
-    ContentType="application/json",
-)
-
-print(f"Uploaded s3://{BUCKET}/{application_key}")
-```
 
 ---
 
