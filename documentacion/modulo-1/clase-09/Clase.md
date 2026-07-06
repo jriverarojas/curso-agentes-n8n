@@ -738,6 +738,9 @@ Si ejecutaste toda la Parte A, esta celda solo confirmará que `df` ya existe. S
 # Importamos io para leer bytes descargados desde S3 como archivo en memoria.
 import io
 
+# Importamos json para imprimir y guardar diccionarios como JSON.
+import json
+
 # Importamos boto3 para leer el CSV desde S3.
 import boto3
 
