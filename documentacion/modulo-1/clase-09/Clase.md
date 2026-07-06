@@ -854,9 +854,9 @@ amount_model.fit(X_train_amount, y_train_amount)
 ### 2. Calcular SHAP global del modelo de monto
 
 ```python
-# Creamos el explicador SHAP para XGBoost.
-# Usamos 100 filas de entrenamiento como background o referencia.
-amount_explainer = shap.Explainer(amount_model, X_train_amount.sample(100, random_state=42))
+# Creamos el explicador SHAP específico para modelos basados en árboles.
+# Para XGBoost es más estable usar TreeExplainer que shap.Explainer directo.
+amount_explainer = shap.TreeExplainer(amount_model)
 
 # Tomamos 200 casos para calcular importancia global.
 amount_sample = X_test_amount.sample(200, random_state=42)
