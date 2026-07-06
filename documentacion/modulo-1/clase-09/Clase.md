@@ -165,7 +165,8 @@ Usaremos el mismo dataset sintético y el mismo modelo de riesgo de Clase 6.
 # Instalamos scikit-learn para entrenar la regresión logística.
 # Instalamos pandas y numpy para trabajar con datos tabulares y cálculos.
 # Instalamos boto3 para leer y escribir archivos en S3.
-%pip install --quiet shap scikit-learn pandas numpy boto3
+# Instalamos xgboost porque en la Parte B entrenaremos el modelo de monto.
+%pip install --quiet shap scikit-learn pandas numpy boto3 xgboost
 ```
 
 ### 2. Leer dataset desde S3
@@ -1173,6 +1174,12 @@ python-explainer/generate_explanation.py
 boto3==1.40.0
 numpy==2.2.6
 ```
+
+Este `requirements.txt` es solo para el script que llama NestJS.
+
+No incluye `xgboost` porque ese script no entrena el modelo; solo lee el JSON de árboles generado en Clase 7 y lo recorre manualmente.
+
+En cambio, el notebook sí instala `xgboost` porque ahí entrenamos el modelo de monto para calcular explicabilidad.
 
 Para mantener la clase simple, este script no recalcula SHAP real para XGBoost. Hace dos cosas:
 
