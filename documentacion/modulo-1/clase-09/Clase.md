@@ -1268,7 +1268,7 @@ modelo JSON + features -> explicación local -> JSON final
 Desde la carpeta del proyecto:
 
 ```bash
-cd solucion
+cd esqueleto
 python3 -m venv .venv-explainer
 source .venv-explainer/bin/activate
 pip install -r python-explainer/requirements.txt
@@ -1292,7 +1292,7 @@ Prueba rápida:
 Desde PowerShell, en la carpeta del proyecto:
 
 ```powershell
-cd solucion
+cd esqueleto
 py -m venv .venv-explainer
 .\.venv-explainer\Scripts\Activate.ps1
 pip install -r python-explainer\requirements.txt
