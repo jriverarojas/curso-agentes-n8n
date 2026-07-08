@@ -71,18 +71,20 @@ amount_model.json
 
 Ese archivo sirve para que NestJS recorra árboles y prediga.
 
-Pero para usar contribuciones nativas de XGBoost necesitamos también:
+También podemos generar un artefacto nativo de XGBoost:
 
 ```txt
 amount_xgboost_model.json
 ```
+
+Ese artefacto es útil para experimentar con `pred_contribs=True` en notebook, pero en el endpoint integrado usaremos `amount_model.json` para explicar el monto. Así la predicción mostrada y la explicación salen del mismo modelo.
 
 Resumen:
 
 | Modelo | Ya teníamos | Agregaremos en Clase 10 | Para qué sirve |
 |--------|-------------|--------------------------|----------------|
 | Riesgo | `risk_model_params.json` | `risk_background.json` | SHAP necesita referencia histórica |
-| Monto | `amount_model.json` | `amount_xgboost_model.json` | XGBoost puede calcular `pred_contribs=True` |
+| Monto | `amount_model.json` | `amount_xgboost_model.json` opcional | El endpoint integrado explica con `amount_model.json` para coincidir con NestJS |
 
 ---
 
@@ -296,10 +298,13 @@ macOS:
 
 ```bash
 cd esqueleto
+brew install libomp
 python3 -m venv .venv-explainer
 source .venv-explainer/bin/activate
 pip install -r python-explainer/requirements.txt
 ```
+
+`libomp` es necesario en macOS porque XGBoost usa OpenMP para cargar su librería nativa. Si no está instalado, el endpoint de explicaciones falla con un error parecido a `Library not loaded: @rpath/libomp.dylib`.
 
 Windows:
 
@@ -315,14 +320,13 @@ El script ahora puede trabajar en dos modos:
 | Si existe el artefacto | Método usado |
 |------------------------|--------------|
 | `EXPLAIN_RISK_BACKGROUND_KEY` | SHAP con background para riesgo |
-| `SAGEMAKER_AMOUNT_NATIVE_MODEL_KEY` | `pred_contribs=True` nativo de XGBoost para monto |
-| Si no existen | fallback a explicación aproximada |
+| `SAGEMAKER_AMOUNT_MODEL_KEY` | explicación aproximada sobre el mismo JSON que usa NestJS para predecir monto |
+| Si no existe background de riesgo | fallback a explicación por coeficientes |
 
 Configura `.env`:
 
 ```env
 EXPLAIN_RISK_BACKGROUND_KEY=ml/explanations/risk_background.json
-SAGEMAKER_AMOUNT_NATIVE_MODEL_KEY=ml/models/amount/amount_xgboost_model.json
 PYTHON_EXPLAINER_BIN=.venv-explainer/bin/python
 PYTHON_EXPLAINER_SCRIPT=python-explainer/generate_explanation.py
 ```

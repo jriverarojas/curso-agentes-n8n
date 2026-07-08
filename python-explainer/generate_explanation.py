@@ -247,13 +247,25 @@ def explain_amount(features, model):
         "requested_amount": float(features.get("requested_amount", 0)),
         "recommended_amount": round(prediction, 2),
         "base_score": round(float(model["base_score"]), 2),
+        "contributions_sum": round(
+            float(sum(item["contribution"] for item in explanation)),
+            2,
+        ),
+        "method": "tree_path_contribution_approximation",
         "amount_explanation": explanation,
     }
 
 
 def explain_amount_with_xgboost(features, bucket, native_model_key):
-    import pandas as pd
-    import xgboost as xgb
+    try:
+        import pandas as pd
+        import xgboost as xgb
+    except Exception as error:
+        raise SystemExit(
+            "ERROR_XGBOOST_RUNTIME: no se pudo cargar XGBoost. "
+            "En macOS instala OpenMP con `brew install libomp` y luego vuelve a ejecutar. "
+            "En Windows verifica Docker/Visual C++ runtime o usa el entorno de SageMaker."
+        )
 
     case = pd.DataFrame([{name: features[name] for name in AMOUNT_FEATURES}])
 
@@ -310,14 +322,7 @@ def build_local_explanation(args):
     else:
         risk = explain_risk(risk_features, risk_model)
 
-    if args.amount_native_model_key:
-        amount = explain_amount_with_xgboost(
-            amount_features,
-            args.bucket,
-            args.amount_native_model_key,
-        )
-    else:
-        amount = explain_amount(amount_features, amount_model)
+    amount = explain_amount(amount_features, amount_model)
 
     return {
         "application_id": application_id,
