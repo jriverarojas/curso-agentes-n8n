@@ -1,6 +1,7 @@
 import argparse
 import json
 import math
+import tempfile
 from pathlib import Path
 
 import boto3
@@ -47,8 +48,32 @@ def read_json_s3(bucket, key):
     return json.loads(response["Body"].read().decode("utf-8"))
 
 
+def download_s3_file(bucket, key, destination):
+    s3 = boto3.client("s3")
+    s3.download_file(bucket, key, destination)
+
+
 def sigmoid(value):
     return 1 / (1 + math.exp(-value))
+
+
+def predict_risk_probabilities_from_json(model, rows):
+    probabilities = []
+
+    for _, row in rows.iterrows():
+        score = float(model["intercept"])
+        for feature_name in model["features"]:
+            raw_value = float(row[feature_name])
+            mean = float(model["scaler"]["mean"][feature_name])
+            scale = float(model["scaler"]["scale"].get(feature_name) or 1)
+            coefficient = float(model["coefficients"][feature_name])
+            standardized_value = (raw_value - mean) / scale
+            score += standardized_value * coefficient
+
+        probabilities.append(sigmoid(score))
+
+    probabilities = np.array(probabilities)
+    return np.column_stack([1 - probabilities, probabilities])
 
 
 def explain_risk(features, model):
@@ -86,6 +111,58 @@ def explain_risk(features, model):
         "score": round(score, 6),
         "base_score": round(float(model["intercept"]), 6),
         "contributions_sum": round(float(np.sum([item["contribution"] for item in explanation])), 6),
+        "risk_explanation": explanation,
+    }
+
+
+def explain_risk_with_shap(features, model, background_rows):
+    import pandas as pd
+    import shap
+
+    background = pd.DataFrame(background_rows)[model["features"]]
+    case = pd.DataFrame([{name: features[name] for name in model["features"]}])
+
+    def predict_proba(rows):
+        frame = pd.DataFrame(rows, columns=model["features"])
+        return predict_risk_probabilities_from_json(model, frame)
+
+    explainer = shap.Explainer(predict_proba, background)
+    shap_result = explainer(case)
+
+    values = shap_result.values
+    base_values = shap_result.base_values
+
+    if values.ndim == 3:
+        contributions = values[0, :, 1]
+        base_value = float(base_values[0][1])
+    else:
+        contributions = values[0]
+        base_value = float(base_values[0])
+
+    probability = float(predict_risk_probabilities_from_json(model, case)[0][1])
+    threshold = float(model.get("threshold", 0.5))
+
+    explanation = [
+        {
+            "feature": feature,
+            "value": float(case.iloc[0][feature]),
+            "contribution": round(float(contribution), 6),
+            "direction": "sube el riesgo" if contribution > 0 else "baja el riesgo",
+        }
+        for feature, contribution in zip(model["features"], contributions)
+    ]
+    explanation.sort(key=lambda item: abs(item["contribution"]), reverse=True)
+
+    contributions_sum = float(np.sum(contributions))
+
+    return {
+        "default_probability": round(probability, 4),
+        "risk_label": "HIGH" if probability >= threshold else "LOW",
+        "threshold": threshold,
+        "base_value": round(base_value, 6),
+        "contributions_sum": round(contributions_sum, 6),
+        "reconstructed_probability": round(base_value + contributions_sum, 6),
+        "method": "shap_with_background",
         "risk_explanation": explanation,
     }
 
@@ -174,6 +251,49 @@ def explain_amount(features, model):
     }
 
 
+def explain_amount_with_xgboost(features, bucket, native_model_key):
+    import pandas as pd
+    import xgboost as xgb
+
+    case = pd.DataFrame([{name: features[name] for name in AMOUNT_FEATURES}])
+
+    with tempfile.NamedTemporaryFile(suffix=".json") as model_file:
+        download_s3_file(bucket, native_model_key, model_file.name)
+        booster = xgb.Booster()
+        booster.load_model(model_file.name)
+
+        matrix = xgb.DMatrix(case, feature_names=AMOUNT_FEATURES)
+        contributions = booster.predict(matrix, pred_contribs=True)[0]
+
+    base_value = float(contributions[-1])
+    feature_contributions = contributions[:-1]
+    prediction = float(base_value + np.sum(feature_contributions))
+
+    explanation = [
+        {
+            "feature": feature,
+            "value": float(case.iloc[0][feature]),
+            "contribution": round(float(contribution), 2),
+            "direction": (
+                "sube el monto recomendado"
+                if contribution > 0
+                else "baja el monto recomendado"
+            ),
+        }
+        for feature, contribution in zip(AMOUNT_FEATURES, feature_contributions)
+    ]
+    explanation.sort(key=lambda item: abs(item["contribution"]), reverse=True)
+
+    return {
+        "requested_amount": float(features.get("requested_amount", 0)),
+        "recommended_amount": round(prediction, 2),
+        "base_value": round(base_value, 2),
+        "contributions_sum": round(float(np.sum(feature_contributions)), 2),
+        "method": "xgboost_pred_contribs",
+        "amount_explanation": explanation,
+    }
+
+
 def build_local_explanation(args):
     payload = read_json_file(args.input)
     application_id = payload["application_id"]
@@ -181,8 +301,23 @@ def build_local_explanation(args):
     risk_model = read_json_s3(args.bucket, args.risk_model_key)
     amount_model = read_json_s3(args.bucket, args.amount_model_key)
 
-    risk = explain_risk({name: features[name] for name in RISK_FEATURES}, risk_model)
-    amount = explain_amount({name: features[name] for name in AMOUNT_FEATURES}, amount_model)
+    risk_features = {name: features[name] for name in RISK_FEATURES}
+    amount_features = {name: features[name] for name in AMOUNT_FEATURES}
+
+    if args.risk_background_key:
+        risk_background = read_json_s3(args.bucket, args.risk_background_key)
+        risk = explain_risk_with_shap(risk_features, risk_model, risk_background)
+    else:
+        risk = explain_risk(risk_features, risk_model)
+
+    if args.amount_native_model_key:
+        amount = explain_amount_with_xgboost(
+            amount_features,
+            args.bucket,
+            args.amount_native_model_key,
+        )
+    else:
+        amount = explain_amount(amount_features, amount_model)
 
     return {
         "application_id": application_id,
@@ -191,19 +326,22 @@ def build_local_explanation(args):
             "risk_label": risk["risk_label"],
             "threshold": risk["threshold"],
         },
-        "risk_shap_like_summary": {
-            "base_score": risk["base_score"],
+        "risk_explanation_summary": {
+            "base_value": risk.get("base_value", risk.get("base_score")),
             "contributions_sum": risk["contributions_sum"],
-            "score": risk["score"],
+            "reconstructed_probability": risk.get("reconstructed_probability"),
+            "score": risk.get("score"),
+            "method": risk.get("method", "logistic_coefficient_contributions"),
         },
         "risk_explanation": risk["risk_explanation"][:8],
         "amount": {
             "requested_amount": amount["requested_amount"],
             "recommended_amount": amount["recommended_amount"],
         },
-        "amount_tree_path_summary": {
-            "base_score": amount["base_score"],
-            "method": "tree_path_contribution_approximation",
+        "amount_explanation_summary": {
+            "base_value": amount.get("base_value", amount.get("base_score")),
+            "contributions_sum": amount.get("contributions_sum"),
+            "method": amount.get("method", "tree_path_contribution_approximation"),
         },
         "amount_explanation": amount["amount_explanation"][:8],
     }
@@ -221,6 +359,8 @@ def main():
     parser.add_argument("--input")
     parser.add_argument("--risk-model-key")
     parser.add_argument("--amount-model-key")
+    parser.add_argument("--risk-background-key")
+    parser.add_argument("--amount-native-model-key")
     args = parser.parse_args()
 
     if args.mode == "read-global":
