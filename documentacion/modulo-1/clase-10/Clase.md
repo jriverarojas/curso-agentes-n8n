@@ -391,7 +391,7 @@ Todos estarán bajo:
 | `POST` | `/applications` | Crea una solicitud nueva |
 | `GET` | `/applications` | Lista solicitudes con `applicationId`, nombre, estado actual y metadatos |
 | `GET` | `/document-types` | Lista documentos activos configurados en la base de datos |
-| `GET` | `/applications/:applicationId` | Consulta solicitud, documentos y features |
+| `GET` | `/applications/:applicationId` | Consulta solicitud, documentos, datos extraídos, limpieza, features, predicciones, evaluación y explicaciones guardadas |
 | `POST` | `/applications/:applicationId/documents` | Sube un documento a S3 y lo registra |
 | `POST` | `/applications/:applicationId/process-documents` | Ejecuta Textract |
 | `POST` | `/applications/:applicationId/clean` | Inicia limpieza |
@@ -402,9 +402,274 @@ Todos estarán bajo:
 | `POST` | `/applications/:applicationId/risk` | Analiza riesgo |
 | `POST` | `/applications/:applicationId/amount` | Analiza monto |
 | `POST` | `/applications/:applicationId/evaluate` | Evalúa riesgo + monto |
+| `POST` | `/applications/:applicationId/explanation/generate` | Genera explicaciones y las guarda |
 | `GET` | `/applications/:applicationId/risk-explanation` | Lee explicación de riesgo |
 | `GET` | `/applications/:applicationId/amount-explanation` | Lee explicación de monto |
 | `GET` | `/applications/:applicationId/explanation` | Lee explicación completa |
+
+---
+
+## Paso 0: crear migraciones y entidades
+
+Antes de implementar los endpoints, primero creamos las tablas nuevas que usara la clase 10.
+
+Esto debe ir al inicio porque si el service inyecta repositorios de tablas que todavia no existen, el backend puede compilar, pero al ejecutar endpoints fallara contra la base de datos.
+
+En esta clase agregaremos tres tablas:
+
+| Tabla | Para que sirve |
+|-------|----------------|
+| `application_model_predictions` | guarda cada prediccion de riesgo y monto |
+| `application_evaluations` | guarda la evaluacion integrada final |
+| `application_model_explanations` | guarda explicaciones de riesgo y monto |
+
+### Archivo `src/migrations/1782100000000-CreateApplicationModelPredictions.ts`
+
+```typescript
+import { MigrationInterface, QueryRunner } from 'typeorm';
+
+export class CreateApplicationModelPredictions1782100000000
+  implements MigrationInterface
+{
+  name = 'CreateApplicationModelPredictions1782100000000';
+
+  public async up(queryRunner: QueryRunner): Promise<void> {
+    const schema = process.env.DATABASE_SCHEMA ?? 'public';
+    const q = `"${schema}"`;
+
+    await queryRunner.query(`
+      CREATE TABLE ${q}."application_model_predictions" (
+        "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        "application_id" uuid NOT NULL,
+        "prediction_type" text NOT NULL,
+        "model_type" text NOT NULL,
+        "result_payload" jsonb NOT NULL DEFAULT '{}'::jsonb,
+        "features_payload" jsonb NOT NULL DEFAULT '{}'::jsonb,
+        "created_at" timestamptz NOT NULL DEFAULT now(),
+        CONSTRAINT "FK_application_model_predictions_application"
+          FOREIGN KEY ("application_id") REFERENCES ${q}."credit_applications"("id")
+      )
+    `);
+
+    await queryRunner.query(`
+      CREATE INDEX "IDX_application_model_predictions_application_type_created"
+        ON ${q}."application_model_predictions" ("application_id", "prediction_type", "created_at" DESC)
+    `);
+  }
+
+  public async down(queryRunner: QueryRunner): Promise<void> {
+    const schema = process.env.DATABASE_SCHEMA ?? 'public';
+    const q = `"${schema}"`;
+
+    await queryRunner.query(
+      `DROP INDEX IF EXISTS ${q}."IDX_application_model_predictions_application_type_created"`,
+    );
+    await queryRunner.query(
+      `DROP TABLE IF EXISTS ${q}."application_model_predictions"`,
+    );
+  }
+}
+```
+
+### Archivo `src/migrations/1782200000000-CreateApplicationModelExplanations.ts`
+
+```typescript
+import { MigrationInterface, QueryRunner } from 'typeorm';
+
+export class CreateApplicationModelExplanations1782200000000
+  implements MigrationInterface
+{
+  name = 'CreateApplicationModelExplanations1782200000000';
+
+  public async up(queryRunner: QueryRunner): Promise<void> {
+    const schema = process.env.DATABASE_SCHEMA ?? 'public';
+    const q = `"${schema}"`;
+
+    await queryRunner.query(`
+      CREATE TABLE ${q}."application_model_explanations" (
+        "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        "application_id" uuid NOT NULL,
+        "explanation_type" text NOT NULL,
+        "model_type" text NOT NULL,
+        "explanation_payload" jsonb NOT NULL DEFAULT '{}'::jsonb,
+        "s3_key" text,
+        "created_at" timestamptz NOT NULL DEFAULT now(),
+        CONSTRAINT "FK_application_model_explanations_application"
+          FOREIGN KEY ("application_id") REFERENCES ${q}."credit_applications"("id")
+      )
+    `);
+
+    await queryRunner.query(`
+      CREATE INDEX "IDX_application_model_explanations_application_type_created"
+        ON ${q}."application_model_explanations" ("application_id", "explanation_type", "created_at" DESC)
+    `);
+  }
+
+  public async down(queryRunner: QueryRunner): Promise<void> {
+    const schema = process.env.DATABASE_SCHEMA ?? 'public';
+    const q = `"${schema}"`;
+
+    await queryRunner.query(
+      `DROP INDEX IF EXISTS ${q}."IDX_application_model_explanations_application_type_created"`,
+    );
+    await queryRunner.query(
+      `DROP TABLE IF EXISTS ${q}."application_model_explanations"`,
+    );
+  }
+}
+```
+
+### Archivo `src/migrations/1782300000000-CreateApplicationEvaluations.ts`
+
+```typescript
+import { MigrationInterface, QueryRunner } from 'typeorm';
+
+export class CreateApplicationEvaluations1782300000000
+  implements MigrationInterface
+{
+  name = 'CreateApplicationEvaluations1782300000000';
+
+  public async up(queryRunner: QueryRunner): Promise<void> {
+    const schema = process.env.DATABASE_SCHEMA ?? 'public';
+    const q = `"${schema}"`;
+
+    await queryRunner.query(`
+      CREATE TABLE ${q}."application_evaluations" (
+        "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        "application_id" uuid NOT NULL,
+        "decision" text NOT NULL,
+        "evaluation_payload" jsonb NOT NULL DEFAULT '{}'::jsonb,
+        "created_at" timestamptz NOT NULL DEFAULT now(),
+        CONSTRAINT "FK_application_evaluations_application"
+          FOREIGN KEY ("application_id") REFERENCES ${q}."credit_applications"("id")
+      )
+    `);
+
+    await queryRunner.query(`
+      CREATE INDEX "IDX_application_evaluations_application_created"
+        ON ${q}."application_evaluations" ("application_id", "created_at" DESC)
+    `);
+  }
+
+  public async down(queryRunner: QueryRunner): Promise<void> {
+    const schema = process.env.DATABASE_SCHEMA ?? 'public';
+    const q = `"${schema}"`;
+
+    await queryRunner.query(
+      `DROP INDEX IF EXISTS ${q}."IDX_application_evaluations_application_created"`,
+    );
+    await queryRunner.query(
+      `DROP TABLE IF EXISTS ${q}."application_evaluations"`,
+    );
+  }
+}
+```
+
+### Archivo `src/entities/application-model-prediction.entity.ts`
+
+```typescript
+import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn } from 'typeorm';
+
+@Entity({ name: 'application_model_predictions' })
+export class ApplicationModelPrediction {
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
+
+  @Column({ name: 'application_id', type: 'uuid' })
+  applicationId: string;
+
+  @Column({ name: 'prediction_type', type: 'text' })
+  predictionType: string;
+
+  @Column({ name: 'model_type', type: 'text' })
+  modelType: string;
+
+  @Column({ name: 'result_payload', type: 'jsonb', default: {} })
+  resultPayload: Record<string, unknown>;
+
+  @Column({ name: 'features_payload', type: 'jsonb', default: {} })
+  featuresPayload: Record<string, unknown>;
+
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
+  createdAt: Date;
+}
+```
+
+### Archivo `src/entities/application-model-explanation.entity.ts`
+
+```typescript
+import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn } from 'typeorm';
+
+@Entity({ name: 'application_model_explanations' })
+export class ApplicationModelExplanation {
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
+
+  @Column({ name: 'application_id', type: 'uuid' })
+  applicationId: string;
+
+  @Column({ name: 'explanation_type', type: 'text' })
+  explanationType: string;
+
+  @Column({ name: 'model_type', type: 'text' })
+  modelType: string;
+
+  @Column({ name: 'explanation_payload', type: 'jsonb', default: {} })
+  explanationPayload: Record<string, unknown>;
+
+  @Column({ name: 's3_key', type: 'text', nullable: true })
+  s3Key?: string;
+
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
+  createdAt: Date;
+}
+```
+
+### Archivo `src/entities/application-evaluation.entity.ts`
+
+```typescript
+import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn } from 'typeorm';
+
+@Entity({ name: 'application_evaluations' })
+export class ApplicationEvaluation {
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
+
+  @Column({ name: 'application_id', type: 'uuid' })
+  applicationId: string;
+
+  @Column({ name: 'decision', type: 'text' })
+  decision: string;
+
+  @Column({ name: 'evaluation_payload', type: 'jsonb', default: {} })
+  evaluationPayload: Record<string, unknown>;
+
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
+  createdAt: Date;
+}
+```
+
+### Ejecutar migraciones
+
+Despues de crear estos archivos, ejecutar:
+
+```bash
+npm run migration:run
+```
+
+Resultado esperado:
+
+```txt
+application_model_predictions
+application_model_explanations
+application_evaluations
+```
+
+Si una migracion falla porque la tabla ya existe, significa que ya fue aplicada antes. En ese caso revisar con:
+
+```bash
+npm run migration:show
+```
 
 ---
 
@@ -452,6 +717,680 @@ Para qué sirve cada una:
 | `ConfigService` | leer `.env` |
 | `InjectRepository` | usar repositorios TypeORM |
 | `Repository` | leer/escribir entidades en BD |
+
+### Codigo completo de `src/modulo1/clase10/clase10.service.ts`
+
+Este es el archivo completo como debe quedar al final de la seccion de backend. Los fragmentos siguientes explican cada parte, pero este bloque sirve para copiar y pegar.
+
+```typescript
+import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { InjectRepository } from '@nestjs/typeorm';
+import { In, Repository } from 'typeorm';
+import { ApplicationDocument } from '../../entities/application-document.entity';
+import { ApplicationEvaluation } from '../../entities/application-evaluation.entity';
+import { ApplicationExtractedData } from '../../entities/application-extracted-data.entity';
+import { ApplicationModelExplanation } from '../../entities/application-model-explanation.entity';
+import { ApplicationModelPrediction } from '../../entities/application-model-prediction.entity';
+import { CleanCreditProfile } from '../../entities/clean-credit-profile.entity';
+import { CreditApplication } from '../../entities/credit-application.entity';
+import { CreditFeatureSet } from '../../entities/credit-feature-set.entity';
+import { DocumentType } from '../../entities/document-type.entity';
+import { GlueJobRunEntity } from '../../entities/glue-job-run.entity';
+import { TextractQueryAnswer } from '../../entities/textract-query-answer.entity';
+import { TextractResult } from '../../entities/textract-result.entity';
+import { Clase03Service } from '../clase03/clase03.service';
+import { Clase04Service } from '../clase04/clase04.service';
+import { Clase05Service } from '../clase05/clase05.service';
+import { Clase06Service } from '../clase06/clase06.service';
+import { Clase07Service } from '../clase07/clase07.service';
+import { Clase08Service } from '../clase08/clase08.service';
+import { Clase09Service } from '../clase09/clase09.service';
+
+type UploadDocumentBody = {
+  documentType: string;
+  fileName: string;
+  contentType?: string;
+  contentBase64: string;
+};
+
+const APPLICATION_STATUSES = {
+  DRAFT: {
+    label: 'Borrador',
+    description: 'La solicitud existe, pero todavia no tiene documentos.',
+    order: 1,
+  },
+  DOCUMENTS_UPLOADED: {
+    label: 'Archivos cargados',
+    description: 'Ya se subieron uno o mas documentos a S3.',
+    order: 2,
+  },
+  DOCUMENTS_PROCESSED: {
+    label: 'Documentos procesados',
+    description: 'Textract ya leyo los documentos y guardo los datos extraidos.',
+    order: 3,
+  },
+  CLEANING_STARTED: {
+    label: 'Limpieza iniciada',
+    description: 'El job de limpieza de datos fue enviado a Glue.',
+    order: 4,
+  },
+  CLEAN_COMPLETED: {
+    label: 'Informacion limpia',
+    description: 'Los datos extraidos ya fueron normalizados.',
+    order: 5,
+  },
+  FEATURES_STARTED: {
+    label: 'Features en proceso',
+    description: 'El job que crea las variables del modelo fue enviado a Glue.',
+    order: 6,
+  },
+  FEATURES_COMPLETED: {
+    label: 'Variables listas',
+    description: 'Las features ya estan guardadas y listas para los modelos.',
+    order: 7,
+  },
+  RISK_ANALYZED: {
+    label: 'Riesgo analizado',
+    description: 'El modelo de riesgo ya devolvio una prediccion.',
+    order: 8,
+  },
+  AMOUNT_ANALYZED: {
+    label: 'Monto analizado',
+    description: 'El modelo de monto ya devolvio una recomendacion.',
+    order: 9,
+  },
+  EVALUATED: {
+    label: 'Evaluacion integrada',
+    description: 'La respuesta final combina riesgo y monto recomendado.',
+    order: 10,
+  },
+  EXPLANATION_GENERATED: {
+    label: 'Explicacion generada',
+    description: 'Ya se genero la explicacion para los resultados del modelo.',
+    order: 11,
+  },
+} as const;
+
+type ApplicationStatus = keyof typeof APPLICATION_STATUSES;
+
+const LEGACY_STATUS_MAP: Record<string, ApplicationStatus> = {
+  CREATED_FROM_UI: 'DRAFT',
+  DOCUMENTS_REGISTERED: 'DOCUMENTS_UPLOADED',
+  TEXTRACT_COMPLETED: 'DOCUMENTS_PROCESSED',
+};
+
+@Injectable()
+export class Clase10Service {
+  private readonly s3: S3Client;
+
+  constructor(
+    private readonly config: ConfigService,
+    private readonly clase03: Clase03Service,
+    private readonly clase04: Clase04Service,
+    private readonly clase05: Clase05Service,
+    private readonly clase06: Clase06Service,
+    private readonly clase07: Clase07Service,
+    private readonly clase08: Clase08Service,
+    private readonly clase09: Clase09Service,
+    @InjectRepository(CreditApplication)
+    private readonly applications: Repository<CreditApplication>,
+    @InjectRepository(ApplicationDocument)
+    private readonly documents: Repository<ApplicationDocument>,
+    @InjectRepository(ApplicationEvaluation)
+    private readonly evaluations: Repository<ApplicationEvaluation>,
+    @InjectRepository(DocumentType)
+    private readonly documentTypes: Repository<DocumentType>,
+    @InjectRepository(CreditFeatureSet)
+    private readonly featureSets: Repository<CreditFeatureSet>,
+    @InjectRepository(ApplicationExtractedData)
+    private readonly extractedData: Repository<ApplicationExtractedData>,
+    @InjectRepository(TextractQueryAnswer)
+    private readonly queryAnswers: Repository<TextractQueryAnswer>,
+    @InjectRepository(TextractResult)
+    private readonly textractResults: Repository<TextractResult>,
+    @InjectRepository(CleanCreditProfile)
+    private readonly cleanProfiles: Repository<CleanCreditProfile>,
+    @InjectRepository(GlueJobRunEntity)
+    private readonly glueRuns: Repository<GlueJobRunEntity>,
+    @InjectRepository(ApplicationModelPrediction)
+    private readonly modelPredictions: Repository<ApplicationModelPrediction>,
+    @InjectRepository(ApplicationModelExplanation)
+    private readonly modelExplanations: Repository<ApplicationModelExplanation>,
+  ) {
+    this.s3 = new S3Client({
+      region: this.config.getOrThrow<string>('AWS_REGION'),
+      credentials: {
+        accessKeyId: this.config.getOrThrow<string>('AWS_ACCESS_KEY_ID'),
+        secretAccessKey: this.config.getOrThrow<string>('AWS_SECRET_ACCESS_KEY'),
+      },
+    });
+  }
+
+  async createApplication(body: {
+    applicantExternalId?: string;
+    applicantName?: string;
+  }) {
+    const application = await this.applications.save(
+      this.applications.create({
+        applicantExternalId: body.applicantExternalId,
+        applicantName: body.applicantName,
+        status: 'DRAFT',
+      }),
+    );
+
+    return {
+      applicationId: application.id,
+      status: application.status,
+      statusLabel: this.statusMeta(application.status).label,
+      application,
+    };
+  }
+
+  async listApplications() {
+    const [applications, total] = await this.applications.findAndCount({
+      order: { updatedAt: 'DESC' },
+      take: 100,
+    });
+
+    const applicationIds = applications.map((application) => application.id);
+    const [documents, features] = applicationIds.length
+      ? await Promise.all([
+          this.documents.find({ where: { applicationId: In(applicationIds) } }),
+          this.featureSets.find({ where: { applicationId: In(applicationIds) } }),
+        ])
+      : [[], []];
+
+    const documentCountByApplication = new Map<string, number>();
+    for (const document of documents) {
+      documentCountByApplication.set(
+        document.applicationId,
+        (documentCountByApplication.get(document.applicationId) ?? 0) + 1,
+      );
+    }
+
+    const applicationsWithFeatures = new Set(
+      features.map((featureSet) => featureSet.applicationId),
+    );
+
+    return {
+      total,
+      items: applications.map((application) => {
+        const status = this.statusMeta(application.status);
+
+        return {
+          applicationId: application.id,
+          applicantExternalId: application.applicantExternalId,
+          applicantName: application.applicantName,
+          status: application.status,
+          statusLabel: status.label,
+          statusDescription: status.description,
+          statusOrder: status.order,
+          documentsCount:
+            documentCountByApplication.get(application.id) ?? 0,
+          hasFeatures: applicationsWithFeatures.has(application.id),
+          createdAt: application.createdAt,
+          updatedAt: application.updatedAt,
+        };
+      }),
+      statusCatalog: Object.entries(APPLICATION_STATUSES).map(
+        ([status, metadata]) => ({
+          status,
+          ...metadata,
+        }),
+      ),
+    };
+  }
+
+  async listDocumentTypes() {
+    const documentTypes = await this.documentTypes.find({
+      where: { isActive: true },
+      order: { category: 'ASC', name: 'ASC' },
+    });
+
+    return {
+      total: documentTypes.length,
+      items: documentTypes.map((documentType) => ({
+        code: documentType.code,
+        name: documentType.name,
+        category: documentType.category,
+      })),
+    };
+  }
+
+  async uploadDocument(applicationId: string, body: UploadDocumentBody) {
+    await this.getApplicationOrThrow(applicationId);
+
+    if (!body.documentType || !body.fileName || !body.contentBase64) {
+      throw new BadRequestException(
+        'documentType, fileName and contentBase64 are required',
+      );
+    }
+
+    const documentType = body.documentType.toUpperCase();
+    await this.validateDocumentType(documentType);
+
+    const key = this.documentKey(applicationId, documentType, body.fileName);
+    const content = this.decodeBase64(body.contentBase64);
+
+    await this.s3.send(
+      new PutObjectCommand({
+        Bucket: this.config.getOrThrow<string>('AWS_S3_BUCKET'),
+        Key: key,
+        Body: content,
+        ContentType: body.contentType ?? 'application/pdf',
+      }),
+    );
+
+    const document = await this.documents.save(
+      this.documents.create({
+        applicationId,
+        documentTypeCode: documentType,
+        fileName: body.fileName,
+        s3Key: key,
+        status: 'UPLOADED',
+      }),
+    );
+
+    await this.applications.update(applicationId, {
+      status: 'DOCUMENTS_UPLOADED',
+    });
+
+    return {
+      applicationId,
+      document,
+      bucket: this.config.getOrThrow<string>('AWS_S3_BUCKET'),
+      s3Key: key,
+    };
+  }
+
+  async getApplication(applicationId: string) {
+    const application = await this.getApplicationOrThrow(applicationId);
+    const documents = await this.documents.find({ where: { applicationId } });
+    const features = await this.featureSets.findOne({
+      where: { applicationId },
+    });
+    const extractedData = await this.extractedData.findOne({
+      where: { applicationId },
+    });
+    const queryAnswers = await this.queryAnswers.find({
+      where: { applicationId },
+      order: { documentTypeCode: 'ASC', alias: 'ASC' },
+    });
+    const textractResults = await this.textractResults.find({
+      where: { applicationId },
+      order: { createdAt: 'DESC' },
+    });
+    const cleanProfile = await this.cleanProfiles.findOne({
+      where: { applicationId },
+    });
+    const cleanJob = await this.glueRuns.findOne({
+      where: { applicationId, jobType: 'CLEAN_CREDIT_FILE' },
+      order: { createdAt: 'DESC' },
+    });
+    const featureJob = await this.glueRuns.findOne({
+      where: { applicationId, jobType: 'FEATURE_ENGINEERING' },
+      order: { createdAt: 'DESC' },
+    });
+    const predictions = await this.modelPredictions.find({
+      where: { applicationId },
+      order: { createdAt: 'DESC' },
+    });
+    const explanations = await this.modelExplanations.find({
+      where: { applicationId },
+      order: { createdAt: 'DESC' },
+    });
+    const evaluations = await this.evaluations.find({
+      where: { applicationId },
+      order: { createdAt: 'DESC' },
+    });
+
+    return {
+      application,
+      documents,
+      features,
+      extractedData,
+      cleanProfile,
+      cleanJob,
+      featureJob,
+      predictions,
+      latestPredictions: this.latestPredictionsByType(predictions),
+      explanations,
+      latestExplanations: this.latestExplanationsByType(explanations),
+      evaluations,
+      latestEvaluation: evaluations[0] ?? null,
+      queryAnswers,
+      textractResults: textractResults.map((result) => ({
+        id: result.id,
+        documentId: result.documentId,
+        documentTypeCode: result.documentTypeCode,
+        status: result.status,
+        summary: result.summary,
+        createdAt: result.createdAt,
+      })),
+    };
+  }
+
+  async processDocuments(applicationId: string) {
+    const result = await this.clase03.processCreditFile(applicationId);
+    await this.applications.update(applicationId, {
+      status: 'DOCUMENTS_PROCESSED',
+    });
+    return result;
+  }
+
+  async startClean(applicationId: string) {
+    const result = await this.clase04.cleanCreditFile({ applicationId });
+    await this.applications.update(applicationId, {
+      status: 'CLEANING_STARTED',
+    });
+    return result;
+  }
+
+  async getCleanStatus(applicationId: string) {
+    const result = await this.clase04.getCleanStatus(applicationId);
+    if (this.isSucceededStatus(result.status)) {
+      await this.applications.update(applicationId, {
+        status: 'CLEAN_COMPLETED',
+      });
+    }
+    return result;
+  }
+
+  async startFeatures(applicationId: string) {
+    const result = await this.clase05.generateFeatures({ applicationId });
+    await this.applications.update(applicationId, {
+      status: 'FEATURES_STARTED',
+    });
+    return result;
+  }
+
+  async getFeaturesStatus(applicationId: string) {
+    const result = await this.clase05.getFeaturesStatus(applicationId);
+    if (this.isSucceededStatus(result.status)) {
+      await this.applications.update(applicationId, {
+        status: 'FEATURES_COMPLETED',
+      });
+    }
+    return result;
+  }
+
+  async getFeatures(applicationId: string) {
+    const result = await this.clase05.getFeatures(applicationId);
+    await this.applications.update(applicationId, {
+      status: 'FEATURES_COMPLETED',
+    });
+    return result;
+  }
+
+  async analyzeRisk(applicationId: string) {
+    const result = await this.clase06.predictApplicationRisk(applicationId);
+    await this.savePrediction(applicationId, 'RISK', result);
+    await this.applications.update(applicationId, {
+      status: 'RISK_ANALYZED',
+    });
+    return result;
+  }
+
+  async analyzeAmount(applicationId: string) {
+    const result = await this.clase07.recommendApplicationAmount(applicationId);
+    await this.savePrediction(applicationId, 'AMOUNT', result);
+    await this.applications.update(applicationId, {
+      status: 'AMOUNT_ANALYZED',
+    });
+    return result;
+  }
+
+  async evaluate(applicationId: string) {
+    const result = await this.clase08.evaluateCreditFile(applicationId);
+    await this.saveEvaluation(applicationId, result);
+    await this.applications.update(applicationId, {
+      status: 'EVALUATED',
+    });
+    return result;
+  }
+
+  async getExplanation(applicationId: string) {
+    const result = await this.clase09.getApplicationExplanation(applicationId);
+    await this.applications.update(applicationId, {
+      status: 'EXPLANATION_GENERATED',
+    });
+    return result;
+  }
+
+  async generateExplanation(applicationId: string) {
+    const result =
+      await this.clase09.generateApplicationExplanation(applicationId);
+    await this.saveExplanationBundle(applicationId, result);
+    await this.applications.update(applicationId, {
+      status: 'EXPLANATION_GENERATED',
+    });
+    return result;
+  }
+
+  async getRiskExplanation(applicationId: string) {
+    const explanation = await this.getExplanation(applicationId);
+    return {
+      applicationId,
+      risk: explanation.risk,
+      riskExplanation: explanation.risk_explanation,
+    };
+  }
+
+  async getAmountExplanation(applicationId: string) {
+    const explanation = await this.getExplanation(applicationId);
+    return {
+      applicationId,
+      amount: explanation.amount,
+      amountExplanation: explanation.amount_explanation,
+    };
+  }
+
+  private async getApplicationOrThrow(applicationId: string) {
+    const application = await this.applications.findOne({
+      where: { id: applicationId },
+    });
+
+    if (!application) {
+      throw new NotFoundException(`Application not found: ${applicationId}`);
+    }
+
+    return application;
+  }
+
+  private async validateDocumentType(documentType: string) {
+    const existing = await this.documentTypes.find({
+      where: { code: In([documentType]), isActive: true },
+    });
+
+    if (!existing.length) {
+      throw new BadRequestException(`Unknown documentType: ${documentType}`);
+    }
+  }
+
+  private documentKey(
+    applicationId: string,
+    documentType: string,
+    fileName: string,
+  ) {
+    const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    return `credit-files/${applicationId}/${documentType}/${Date.now()}-${safeName}`;
+  }
+
+  private decodeBase64(value: string) {
+    const base64 = value.includes(',') ? value.split(',').pop()! : value;
+    return Buffer.from(base64, 'base64');
+  }
+
+  private statusMeta(status?: string) {
+    const normalizedStatus =
+      status && LEGACY_STATUS_MAP[status] ? LEGACY_STATUS_MAP[status] : status;
+
+    return (
+      APPLICATION_STATUSES[normalizedStatus as ApplicationStatus] ?? {
+        label: status ?? 'Sin estado',
+        description: 'Estado no catalogado todavia.',
+        order: 0,
+      }
+    );
+  }
+
+  private isSucceededStatus(status?: string) {
+    return ['SUCCEEDED', 'COMPLETED', 'SUCCESS'].includes(
+      String(status ?? '').toUpperCase(),
+    );
+  }
+
+  private async savePrediction(
+    applicationId: string,
+    predictionType: 'RISK' | 'AMOUNT',
+    result: Record<string, unknown>,
+  ) {
+    await this.modelPredictions.save(
+      this.modelPredictions.create({
+        applicationId,
+        predictionType,
+        modelType: String(result.modelType ?? predictionType),
+        resultPayload: result,
+        featuresPayload:
+          typeof result.features === 'object' && result.features !== null
+            ? (result.features as Record<string, unknown>)
+            : {},
+      }),
+    );
+  }
+
+  private async saveEvaluation(
+    applicationId: string,
+    result: Record<string, unknown>,
+  ) {
+    await this.evaluations.save(
+      this.evaluations.create({
+        applicationId,
+        decision: String(result.decision ?? 'UNKNOWN'),
+        evaluationPayload: result,
+      }),
+    );
+  }
+
+  private latestPredictionsByType(predictions: ApplicationModelPrediction[]) {
+    const latest: Record<string, ApplicationModelPrediction> = {};
+
+    for (const prediction of predictions) {
+      if (!latest[prediction.predictionType]) {
+        latest[prediction.predictionType] = prediction;
+      }
+    }
+
+    return latest;
+  }
+
+  private async saveExplanationBundle(
+    applicationId: string,
+    result: Record<string, unknown>,
+  ) {
+    const s3Key = typeof result.s3Key === 'string' ? result.s3Key : undefined;
+
+    await Promise.all([
+      this.saveExplanation(applicationId, 'FULL', result, s3Key),
+      this.saveExplanation(
+        applicationId,
+        'RISK',
+        this.pickExplanationPayload(
+          result,
+          'risk',
+          'risk_explanation_summary',
+          'risk_explanation',
+        ),
+        s3Key,
+      ),
+      this.saveExplanation(
+        applicationId,
+        'AMOUNT',
+        this.pickExplanationPayload(
+          result,
+          'amount',
+          'amount_explanation_summary',
+          'amount_explanation',
+        ),
+        s3Key,
+      ),
+    ]);
+  }
+
+  private pickExplanationPayload(
+    result: Record<string, unknown>,
+    predictionKey: string,
+    summaryKey: string,
+    contributionsKey: string,
+  ) {
+    const summary =
+      typeof result[summaryKey] === 'object' && result[summaryKey] !== null
+        ? (result[summaryKey] as Record<string, unknown>)
+        : {};
+
+    return {
+      prediction: result[predictionKey],
+      explanation: {
+        ...summary,
+        contributions: result[contributionsKey],
+      },
+    };
+  }
+
+  private async saveExplanation(
+    applicationId: string,
+    explanationType: 'FULL' | 'RISK' | 'AMOUNT',
+    payload: Record<string, unknown>,
+    s3Key?: string,
+  ) {
+    await this.modelExplanations.save(
+      this.modelExplanations.create({
+        applicationId,
+        explanationType,
+        modelType: this.explanationModelType(explanationType, payload),
+        explanationPayload: payload,
+        s3Key,
+      }),
+    );
+  }
+
+  private explanationModelType(
+    explanationType: 'FULL' | 'RISK' | 'AMOUNT',
+    payload: Record<string, unknown>,
+  ) {
+    const explanation = payload.explanation;
+    if (
+      typeof explanation === 'object' &&
+      explanation !== null &&
+      'method' in explanation
+    ) {
+      return String((explanation as Record<string, unknown>).method);
+    }
+
+    return explanationType;
+  }
+
+  private latestExplanationsByType(
+    explanations: ApplicationModelExplanation[],
+  ) {
+    const latest: Record<string, ApplicationModelExplanation> = {};
+
+    for (const explanation of explanations) {
+      if (!latest[explanation.explanationType]) {
+        latest[explanation.explanationType] = explanation;
+      }
+    }
+
+    return latest;
+  }
+}
+```
 
 ### Estados de la solicitud
 
@@ -1052,105 +1991,11 @@ async function checkFeaturesStatus() {
 
 Cuando `FEATURES_COMPLETED` está listo, ya podemos usar el primer modelo.
 
-Antes de ejecutar predicciones desde la interfaz, vamos a crear una tabla para guardar los resultados.
+Antes de ejecutar predicciones desde la interfaz, ya tenemos lista la tabla `application_model_predictions`, creada en el Paso 0.
 
-Así los resultados no se pierden al refrescar el navegador.
+Asi los resultados no se pierden al refrescar el navegador.
 
-### Tabla de predicciones
-
-Crearemos:
-
-```txt
-application_model_predictions
-```
-
-Campos:
-
-| Campo | Para qué sirve |
-|-------|----------------|
-| `id` | identificador de la predicción |
-| `application_id` | solicitud analizada |
-| `prediction_type` | `RISK` o `AMOUNT` |
-| `model_type` | tipo de modelo usado |
-| `result_payload` | respuesta completa del modelo |
-| `features_payload` | variables usadas para predecir |
-| `created_at` | fecha de ejecución |
-
-Migración:
-
-```typescript
-import { MigrationInterface, QueryRunner } from 'typeorm';
-
-export class CreateApplicationModelPredictions1782100000000
-  implements MigrationInterface
-{
-  name = 'CreateApplicationModelPredictions1782100000000';
-
-  public async up(queryRunner: QueryRunner): Promise<void> {
-    const schema = process.env.DATABASE_SCHEMA ?? 'public';
-    const q = `"${schema}"`;
-
-    await queryRunner.query(`
-      CREATE TABLE ${q}."application_model_predictions" (
-        "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        "application_id" uuid NOT NULL,
-        "prediction_type" text NOT NULL,
-        "model_type" text NOT NULL,
-        "result_payload" jsonb NOT NULL DEFAULT '{}'::jsonb,
-        "features_payload" jsonb NOT NULL DEFAULT '{}'::jsonb,
-        "created_at" timestamptz NOT NULL DEFAULT now(),
-        CONSTRAINT "FK_application_model_predictions_application"
-          FOREIGN KEY ("application_id") REFERENCES ${q}."credit_applications"("id")
-      )
-    `);
-
-    await queryRunner.query(`
-      CREATE INDEX "IDX_application_model_predictions_application_type_created"
-        ON ${q}."application_model_predictions" ("application_id", "prediction_type", "created_at" DESC)
-    `);
-  }
-
-  public async down(queryRunner: QueryRunner): Promise<void> {
-    const schema = process.env.DATABASE_SCHEMA ?? 'public';
-    const q = `"${schema}"`;
-
-    await queryRunner.query(
-      `DROP INDEX IF EXISTS ${q}."IDX_application_model_predictions_application_type_created"`,
-    );
-    await queryRunner.query(
-      `DROP TABLE IF EXISTS ${q}."application_model_predictions"`,
-    );
-  }
-}
-```
-
-Entidad:
-
-```typescript
-@Entity({ name: 'application_model_predictions' })
-export class ApplicationModelPrediction {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
-
-  @Column({ name: 'application_id', type: 'uuid' })
-  applicationId: string;
-
-  @Column({ name: 'prediction_type', type: 'text' })
-  predictionType: string;
-
-  @Column({ name: 'model_type', type: 'text' })
-  modelType: string;
-
-  @Column({ name: 'result_payload', type: 'jsonb', default: {} })
-  resultPayload: Record<string, unknown>;
-
-  @Column({ name: 'features_payload', type: 'jsonb', default: {} })
-  featuresPayload: Record<string, unknown>;
-
-  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
-  createdAt: Date;
-}
-```
+La entidad que usamos es `ApplicationModelPrediction`.
 
 Endpoint:
 
@@ -1323,7 +2168,7 @@ Así el frontend puede mostrar las predicciones guardadas incluso si se recarga 
 
 Igual que predicciones y explicaciones, la evaluación integrada debe quedar guardada.
 
-Crearemos:
+La tabla ya fue creada en el Paso 0:
 
 ```txt
 application_evaluations
@@ -1410,99 +2255,15 @@ En Clase 10 haremos tres cosas:
 
 ### Tabla de explicaciones
 
-Crearemos:
+La tabla `application_model_explanations` ya fue creada en el Paso 0.
 
-```txt
-application_model_explanations
-```
+La usamos para guardar tres tipos de explicacion:
 
-Campos:
-
-| Campo | Para qué sirve |
-|-------|----------------|
-| `id` | identificador de la explicación |
-| `application_id` | solicitud explicada |
-| `explanation_type` | `FULL`, `RISK` o `AMOUNT` |
-| `model_type` | método o tipo de explicación |
-| `explanation_payload` | explicación completa |
-| `s3_key` | ruta del JSON generado en S3 |
-| `created_at` | fecha de generación |
-
-Migración:
-
-```typescript
-import { MigrationInterface, QueryRunner } from 'typeorm';
-
-export class CreateApplicationModelExplanations1782200000000
-  implements MigrationInterface
-{
-  name = 'CreateApplicationModelExplanations1782200000000';
-
-  public async up(queryRunner: QueryRunner): Promise<void> {
-    const schema = process.env.DATABASE_SCHEMA ?? 'public';
-    const q = `"${schema}"`;
-
-    await queryRunner.query(`
-      CREATE TABLE ${q}."application_model_explanations" (
-        "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        "application_id" uuid NOT NULL,
-        "explanation_type" text NOT NULL,
-        "model_type" text NOT NULL,
-        "explanation_payload" jsonb NOT NULL DEFAULT '{}'::jsonb,
-        "s3_key" text,
-        "created_at" timestamptz NOT NULL DEFAULT now(),
-        CONSTRAINT "FK_application_model_explanations_application"
-          FOREIGN KEY ("application_id") REFERENCES ${q}."credit_applications"("id")
-      )
-    `);
-
-    await queryRunner.query(`
-      CREATE INDEX "IDX_application_model_explanations_application_type_created"
-        ON ${q}."application_model_explanations" ("application_id", "explanation_type", "created_at" DESC)
-    `);
-  }
-
-  public async down(queryRunner: QueryRunner): Promise<void> {
-    const schema = process.env.DATABASE_SCHEMA ?? 'public';
-    const q = `"${schema}"`;
-
-    await queryRunner.query(
-      `DROP INDEX IF EXISTS ${q}."IDX_application_model_explanations_application_type_created"`,
-    );
-    await queryRunner.query(
-      `DROP TABLE IF EXISTS ${q}."application_model_explanations"`,
-    );
-  }
-}
-```
-
-Entidad:
-
-```typescript
-@Entity({ name: 'application_model_explanations' })
-export class ApplicationModelExplanation {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
-
-  @Column({ name: 'application_id', type: 'uuid' })
-  applicationId: string;
-
-  @Column({ name: 'explanation_type', type: 'text' })
-  explanationType: string;
-
-  @Column({ name: 'model_type', type: 'text' })
-  modelType: string;
-
-  @Column({ name: 'explanation_payload', type: 'jsonb', default: {} })
-  explanationPayload: Record<string, unknown>;
-
-  @Column({ name: 's3_key', type: 'text', nullable: true })
-  s3Key?: string;
-
-  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
-  createdAt: Date;
-}
-```
+| Tipo | Que guarda |
+|------|------------|
+| `FULL` | respuesta completa del script Python |
+| `RISK` | explicacion del modelo de riesgo |
+| `AMOUNT` | explicacion del modelo de monto |
 
 Endpoints:
 
@@ -1585,6 +2346,145 @@ src/modulo1/clase10/clase10.controller.ts
 
 El controller define rutas HTTP y llama al service.
 
+Codigo completo de `src/modulo1/clase10/clase10.controller.ts`:
+
+```typescript
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
+import { ApiKeyGuard } from '../../auth/guards/api-key.guard';
+import { Clase10Service } from './clase10.service';
+
+@Controller('modulo1/clase10')
+export class Clase10Controller {
+  constructor(private readonly clase10: Clase10Service) {}
+
+  @Post('applications')
+  @UseGuards(ApiKeyGuard)
+  async createApplication(
+    @Body() body: { applicantExternalId?: string; applicantName?: string },
+  ) {
+    return await this.clase10.createApplication(body);
+  }
+
+  @Get('applications')
+  @UseGuards(ApiKeyGuard)
+  async listApplications() {
+    return await this.clase10.listApplications();
+  }
+
+  @Get('document-types')
+  @UseGuards(ApiKeyGuard)
+  async listDocumentTypes() {
+    return await this.clase10.listDocumentTypes();
+  }
+
+  @Get('applications/:applicationId')
+  @UseGuards(ApiKeyGuard)
+  async getApplication(@Param('applicationId') applicationId: string) {
+    return await this.clase10.getApplication(applicationId);
+  }
+
+  @Post('applications/:applicationId/documents')
+  @UseGuards(ApiKeyGuard)
+  async uploadDocument(
+    @Param('applicationId') applicationId: string,
+    @Body()
+    body: {
+      documentType: string;
+      fileName: string;
+      contentType?: string;
+      contentBase64: string;
+    },
+  ) {
+    return await this.clase10.uploadDocument(applicationId, body);
+  }
+
+  @Post('applications/:applicationId/process-documents')
+  @UseGuards(ApiKeyGuard)
+  async processDocuments(@Param('applicationId') applicationId: string) {
+    return await this.clase10.processDocuments(applicationId);
+  }
+
+  @Post('applications/:applicationId/clean')
+  @UseGuards(ApiKeyGuard)
+  async startClean(@Param('applicationId') applicationId: string) {
+    return await this.clase10.startClean(applicationId);
+  }
+
+  @Get('applications/:applicationId/clean-status')
+  @UseGuards(ApiKeyGuard)
+  async getCleanStatus(@Param('applicationId') applicationId: string) {
+    return await this.clase10.getCleanStatus(applicationId);
+  }
+
+  @Post('applications/:applicationId/features')
+  @UseGuards(ApiKeyGuard)
+  async startFeatures(@Param('applicationId') applicationId: string) {
+    return await this.clase10.startFeatures(applicationId);
+  }
+
+  @Get('applications/:applicationId/features-status')
+  @UseGuards(ApiKeyGuard)
+  async getFeaturesStatus(@Param('applicationId') applicationId: string) {
+    return await this.clase10.getFeaturesStatus(applicationId);
+  }
+
+  @Get('applications/:applicationId/features')
+  @UseGuards(ApiKeyGuard)
+  async getFeatures(@Param('applicationId') applicationId: string) {
+    return await this.clase10.getFeatures(applicationId);
+  }
+
+  @Post('applications/:applicationId/risk')
+  @UseGuards(ApiKeyGuard)
+  async analyzeRisk(@Param('applicationId') applicationId: string) {
+    return await this.clase10.analyzeRisk(applicationId);
+  }
+
+  @Post('applications/:applicationId/amount')
+  @UseGuards(ApiKeyGuard)
+  async analyzeAmount(@Param('applicationId') applicationId: string) {
+    return await this.clase10.analyzeAmount(applicationId);
+  }
+
+  @Post('applications/:applicationId/evaluate')
+  @UseGuards(ApiKeyGuard)
+  async evaluate(@Param('applicationId') applicationId: string) {
+    return await this.clase10.evaluate(applicationId);
+  }
+
+  @Get('applications/:applicationId/explanation')
+  @UseGuards(ApiKeyGuard)
+  async getExplanation(@Param('applicationId') applicationId: string) {
+    return await this.clase10.getExplanation(applicationId);
+  }
+
+  @Post('applications/:applicationId/explanation/generate')
+  @UseGuards(ApiKeyGuard)
+  async generateExplanation(@Param('applicationId') applicationId: string) {
+    return await this.clase10.generateExplanation(applicationId);
+  }
+
+  @Get('applications/:applicationId/risk-explanation')
+  @UseGuards(ApiKeyGuard)
+  async getRiskExplanation(@Param('applicationId') applicationId: string) {
+    return await this.clase10.getRiskExplanation(applicationId);
+  }
+
+  @Get('applications/:applicationId/amount-explanation')
+  @UseGuards(ApiKeyGuard)
+  async getAmountExplanation(@Param('applicationId') applicationId: string) {
+    return await this.clase10.getAmountExplanation(applicationId);
+  }
+}
+```
+
 Ejemplo:
 
 ```typescript
@@ -1646,13 +2546,32 @@ Abrimos:
 http://localhost:5173
 ```
 
-Como el frontend corre en `localhost:5173` y NestJS en `localhost:3000`, el backend debe habilitar CORS:
+Como el frontend corre en un puerto local y NestJS en `localhost:3000`, el backend debe habilitar CORS.
+
+Normalmente Vite usa `5173`, pero si ese puerto está ocupado puede usar otro, por ejemplo `5174`. Por eso no conviene dejar CORS fijo a un solo puerto.
 
 ```typescript
+const localFrontendOrigin = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/;
+
 app.enableCors({
-  origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
+  origin: (
+    origin: string | undefined,
+    callback: (error: Error | null, allow?: boolean) => void,
+  ) => {
+    if (!origin || localFrontendOrigin.test(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error(`CORS origin not allowed: ${origin}`), false);
+  },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'x-api-key', 'x-api-secret'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'x-api-key',
+    'x-api-secret',
+  ],
 });
 ```
 
@@ -1660,9 +2579,10 @@ Qué significa:
 
 | Línea | Para qué sirve |
 |-------|----------------|
-| `origin` | permite llamadas desde el frontend local |
+| `localFrontendOrigin` | acepta cualquier puerto local de `localhost` o `127.0.0.1` |
+| `origin` | revisa el origen del navegador y lo permite si es local |
 | `methods` | habilita los métodos HTTP que usaremos |
-| `allowedHeaders` | permite enviar API key y secret |
+| `allowedHeaders` | permite enviar JSON, API key, secret y authorization |
 
 ---
 
@@ -1799,54 +2719,144 @@ Flujo del frontend para documentos:
 
 ## Paso 13: registrar en `Modulo1Module`
 
-Agregar imports:
+En este archivo registramos controllers, services y entidades para que NestJS pueda inyectar repositorios y dependencias.
+
+Codigo completo de `src/modulo1/modulo1.module.ts`:
 
 ```typescript
+import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { AuthModule } from '../auth/auth.module';
+import { ApplicationDocument } from '../entities/application-document.entity';
+import { ApplicationEvaluation } from '../entities/application-evaluation.entity';
+import { ApplicationExtractedData } from '../entities/application-extracted-data.entity';
+import { ApplicationModelExplanation } from '../entities/application-model-explanation.entity';
+import { ApplicationModelPrediction } from '../entities/application-model-prediction.entity';
+import { CleanCreditProfile } from '../entities/clean-credit-profile.entity';
+import { CreditApplication } from '../entities/credit-application.entity';
+import { CreditFeatureSet } from '../entities/credit-feature-set.entity';
+import { DocumentType } from '../entities/document-type.entity';
+import { GlueJobRunEntity } from '../entities/glue-job-run.entity';
+import { RawDocumentText } from '../entities/raw-document-text.entity';
+import { TextractQueryAnswer } from '../entities/textract-query-answer.entity';
+import { TextractResult } from '../entities/textract-result.entity';
+import { Clase01Controller } from './clase01/clase01.controller';
+import { Clase01Service } from './clase01/clase01.service';
+import { TextractService } from './clase01/textract.service';
+import { Clase02Controller } from './clase02/clase02.controller';
+import { Clase02Service } from './clase02/clase02.service';
+import { Clase03Controller } from './clase03/clase03.controller';
+import { Clase03Service } from './clase03/clase03.service';
+import { Clase04Controller } from './clase04/clase04.controller';
+import { Clase04Service } from './clase04/clase04.service';
+import { GlueService } from './clase04/glue.service';
+import { Clase05Controller } from './clase05/clase05.controller';
+import { Clase05Service } from './clase05/clase05.service';
+import { Clase06Controller } from './clase06/clase06.controller';
+import { Clase06Service } from './clase06/clase06.service';
+import { Clase07Controller } from './clase07/clase07.controller';
+import { Clase07Service } from './clase07/clase07.service';
+import { Clase08Controller } from './clase08/clase08.controller';
+import { Clase08Service } from './clase08/clase08.service';
+import { Clase09Controller } from './clase09/clase09.controller';
+import { Clase09Service } from './clase09/clase09.service';
 import { Clase10Controller } from './clase10/clase10.controller';
 import { Clase10Service } from './clase10/clase10.service';
-```
 
-Agregar controller:
-
-```typescript
-controllers: [
-  Clase10Controller,
-]
-```
-
-Agregar provider:
-
-```typescript
-providers: [
-  Clase10Service,
-]
+@Module({
+  imports: [
+    AuthModule,
+    TypeOrmModule.forFeature([
+      RawDocumentText,
+      CreditApplication,
+      ApplicationDocument,
+      ApplicationEvaluation,
+      ApplicationModelExplanation,
+      ApplicationModelPrediction,
+      DocumentType,
+      TextractResult,
+      TextractQueryAnswer,
+      ApplicationExtractedData,
+      CleanCreditProfile,
+      GlueJobRunEntity,
+      CreditFeatureSet,
+    ]),
+  ],
+  controllers: [
+    Clase01Controller,
+    Clase02Controller,
+    Clase03Controller,
+    Clase04Controller,
+    Clase05Controller,
+    Clase06Controller,
+    Clase07Controller,
+    Clase08Controller,
+    Clase09Controller,
+    Clase10Controller,
+  ],
+  providers: [
+    Clase01Service,
+    Clase02Service,
+    Clase03Service,
+    Clase04Service,
+    Clase05Service,
+    Clase06Service,
+    Clase07Service,
+    Clase08Service,
+    Clase09Service,
+    Clase10Service,
+    GlueService,
+    TextractService,
+  ],
+})
+export class Modulo1Module {}
 ```
 
 ---
 
-## Paso 14: aumentar límite de JSON
+## Paso 14: aumentar limite de JSON y habilitar CORS
 
-Como subimos archivos en base64, necesitamos aceptar bodies más grandes.
+Como subimos archivos en base64, necesitamos aceptar bodies mas grandes.
 
-Archivo:
+Tambien habilitamos CORS para que el frontend local pueda llamar al backend aunque Vite cambie de puerto, por ejemplo `5173`, `5174` o `5500`.
 
-```txt
-src/main.ts
-```
-
-Agregar:
+Codigo completo de `src/main.ts`:
 
 ```typescript
+import { NestFactory } from '@nestjs/core';
 import { json } from 'express';
+import { AppModule } from './app.module';
+
+const localFrontendOrigin = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/;
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  app.enableCors({
+    origin: (
+      origin: string | undefined,
+      callback: (error: Error | null, allow?: boolean) => void,
+    ) => {
+      if (!origin || localFrontendOrigin.test(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error(`CORS origin not allowed: ${origin}`), false);
+    },
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'x-api-key',
+      'x-api-secret',
+    ],
+  });
+  app.use(json({ limit: '20mb' }));
+  const port = Number(process.env.PORT) || 3000;
+  await app.listen(port, '0.0.0.0');
+}
+bootstrap();
 ```
-
-Y dentro de `bootstrap`:
-
-```typescript
-app.use(json({ limit: '20mb' }));
-```
-
-Esto evita errores cuando subimos PDFs pequeños desde el frontend.
 
 ---
 
