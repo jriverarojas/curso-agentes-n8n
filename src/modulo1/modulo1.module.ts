@@ -21,6 +21,9 @@ import { GlueJobRunEntity } from '../entities/glue-job-run.entity';
 import { Clase04Controller } from './clase04/clase04.controller';
 import { Clase04Service } from './clase04/clase04.service';
 import { GlueService } from './clase04/glue.service';
+import { ApplicationEvaluation } from '../entities/application-evaluation.entity';
+import { ApplicationModelPrediction } from '../entities/application-model-prediction.entity';
+import { ApplicationModelExplanation } from '../entities/application-model-explanation.entity';
 
 import { CreditFeatureSet } from '../entities/credit-feature-set.entity';
 import { Clase05Controller } from './clase05/clase05.controller';
@@ -33,6 +36,8 @@ import { Clase08Controller } from './clase08/clase08.controller';
 import { Clase08Service } from './clase08/clase08.service';
 import { Clase09Controller } from './clase09/clase09.controller';
 import { Clase09Service } from './clase09/clase09.service';
+import { Clase10Controller } from './clase10/clase10.controller';
+import { Clase10Service } from './clase10/clase10.service';
 
 
 @Module({
@@ -49,6 +54,9 @@ import { Clase09Service } from './clase09/clase09.service';
       CleanCreditProfile,
       GlueJobRunEntity,
       CreditFeatureSet,
+      ApplicationEvaluation,
+      ApplicationModelPrediction,
+      ApplicationModelExplanation,
     ]),
   ],
   controllers: [
@@ -61,6 +69,7 @@ import { Clase09Service } from './clase09/clase09.service';
     Clase07Controller,
     Clase08Controller,
     Clase09Controller,
+    Clase10Controller,
   ],
   providers: [
     Clase01Service,
@@ -72,6 +81,7 @@ import { Clase09Service } from './clase09/clase09.service';
     Clase07Service,
     Clase08Service,
     Clase09Service,
+    Clase10Service,
     TextractService,
     GlueService,
   ],
